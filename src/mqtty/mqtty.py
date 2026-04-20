@@ -1,17 +1,38 @@
+import argparse
+import contextlib
 import os
 import pty
 import select
+import signal
+import sys
+import termios
 import threading
-from typing import Any, Dict, Optional, Literal
+import tty
+from typing import Any, Dict, Iterator, Literal, Optional
+from urllib.parse import urlparse
+
 from paho.mqtt.client import Client, MQTTMessage
+from paho.mqtt.enums import CallbackAPIVersion
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
-from paho.mqtt.enums import CallbackAPIVersion
-from urllib.parse import urlparse
-import sys
-import argparse
-import subprocess
-import signal
+
+
+PICOCOM_ESCAPE = 0x01
+PICOCOM_EXIT = 0x18
+
+
+@contextlib.contextmanager
+def raw_tty_mode(fd: int) -> Iterator[None]:
+    if not os.isatty(fd):
+        yield
+        return
+
+    original_mode = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
 
 
 class MQTTY:
@@ -23,7 +44,10 @@ class MQTTY:
             raise ValueError("Invalid URI scheme. Expected 'mqtt://', 'ws://', or 'wss://'.")
 
         self.mqtt_host = self.mqtt_uri.hostname
-        self.mqtt_port = self.mqtt_uri.port or (443 if self.mqtt_uri.scheme == "wss" else 80)
+        if self.mqtt_host is None:
+            raise ValueError("MQTT URI must include a hostname.")
+        default_ports = {"mqtt": 1883, "ws": 80, "wss": 443}
+        self.mqtt_port = self.mqtt_uri.port or default_ports[self.mqtt_uri.scheme]
         self.mqtt_transport: Literal["tcp", "websockets"] = (
             "websockets" if self.mqtt_uri.scheme in ["ws", "wss"] else "tcp"
         )
@@ -46,7 +70,9 @@ class MQTTY:
             self.slave_name = os.ttyname(self.slave_fd)
 
         self.connected = False
+        self.connected_event = threading.Event()
         self.stop_event = threading.Event()
+        self.escape_pending = False
 
     def on_message(self, _client: Client, _userdata: object, msg: MQTTMessage) -> None:
         try:
@@ -55,6 +81,8 @@ class MQTTY:
             else:
                 sys.stdout.buffer.write(msg.payload)
                 sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            self.shutdown()
         except Exception as e:
             sys.stderr.write(f"Error handling MQTT message: {e}\n")
 
@@ -70,6 +98,7 @@ class MQTTY:
         ) -> None:
             if reason_code == 0:
                 self.connected = True
+                self.connected_event.set()
                 client.subscribe(self.device_serial_output_topic)
             else:
                 sys.stderr.write(f"Failed to connect to MQTT broker, return code {reason_code}\n")
@@ -81,30 +110,102 @@ class MQTTY:
             properties: Optional[Properties],
         ) -> None:
             self.connected = False
+            self.connected_event.clear()
 
         self.mqtt_client.on_connect = on_connect
         self.mqtt_client.on_disconnect = on_disconnect
 
-        if self.mqtt_host is None:
-            raise ValueError("MQTT URI must include a hostname.")
         try:
             self.mqtt_client.connect_async(self.mqtt_host, self.mqtt_port)
             self.mqtt_client.loop_forever()
         except Exception as e:
             sys.stderr.write(f"MQTT connection failed: {e}\n")
+        finally:
+            self.connected = False
+            self.connected_event.clear()
+            self.stop_event.set()
+
+    def wait_for_connection(self) -> bool:
+        while not self.stop_event.is_set():
+            if self.connected_event.wait(timeout=0.1):
+                return True
+
+        return False
 
     def pty_to_mqtt(self) -> None:
         while not self.stop_event.is_set():
+            if not self.wait_for_connection():
+                break
+
             try:
                 if self.master_fd is not None:
-                    ready, _, _ = select.select([self.master_fd], [], [], 1)
+                    ready, _, _ = select.select([self.master_fd], [], [], 0.1)
                     if self.master_fd in ready:
                         data = os.read(self.master_fd, 1024)
+                        if not data:
+                            break
                         if self.connected:
                             self.mqtt_client.publish(self.device_serial_input_topic, data)
             except Exception as e:
-                sys.stderr.write(f"Error reading from PTY: {e}\n")
+                if not self.stop_event.is_set():
+                    sys.stderr.write(f"Error reading from PTY: {e}\n")
                 break
+
+        self.stop_event.set()
+
+    def decode_stdin(self, data: bytes) -> tuple[bytes, bool]:
+        output = bytearray()
+
+        for byte in data:
+            if self.escape_pending:
+                self.escape_pending = False
+                if byte == PICOCOM_EXIT:
+                    return bytes(output), True
+                if byte == PICOCOM_ESCAPE:
+                    output.append(PICOCOM_ESCAPE)
+                else:
+                    output.extend((PICOCOM_ESCAPE, byte))
+                continue
+
+            if byte == PICOCOM_ESCAPE:
+                self.escape_pending = True
+            else:
+                output.append(byte)
+
+        return bytes(output), False
+
+    def stdio_to_mqtt(self) -> None:
+        stdin_fd = sys.stdin.fileno()
+        use_escape_mode = os.isatty(stdin_fd)
+
+        with raw_tty_mode(stdin_fd):
+            while not self.stop_event.is_set():
+                if not self.wait_for_connection():
+                    break
+
+                try:
+                    ready, _, _ = select.select([stdin_fd], [], [], 0.1)
+                except InterruptedError:
+                    continue
+
+                if stdin_fd not in ready:
+                    continue
+
+                data = os.read(stdin_fd, 1024)
+                if not data:
+                    break
+
+                should_exit = False
+                if use_escape_mode:
+                    data, should_exit = self.decode_stdin(data)
+
+                if data:
+                    self.mqtt_client.publish(self.device_serial_input_topic, data)
+
+                if should_exit:
+                    break
+
+        self.stop_event.set()
 
     def start_threads(self) -> None:
         mqtt_thread = threading.Thread(target=self.mqtt_connect, daemon=True)
@@ -116,69 +217,58 @@ class MQTTY:
 
     def shutdown(self) -> None:
         self.stop_event.set()
-        self.mqtt_client.loop_stop()
-        self.mqtt_client.disconnect()
+        self.connected = False
+        self.connected_event.clear()
+        with contextlib.suppress(Exception):
+            self.mqtt_client.disconnect()
         if self.use_pty:
             if self.master_fd is not None:
                 os.close(self.master_fd)
+                self.master_fd = None
             if self.slave_fd is not None:
                 os.close(self.slave_fd)
+                self.slave_fd = None
+
+
+def install_signal_handlers(bridge: MQTTY) -> None:
+    def handle_signal(_signum: int, _frame: object) -> None:
+        bridge.shutdown()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MQTTY: Bridge MQTT to PTY.")
+    parser = argparse.ArgumentParser(description="MQTTY: Bridge MQTT to a local terminal or PTY.")
     parser.add_argument("mqtt_uri", help="MQTT URI (e.g., mqtt://broker/topic)")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
+    parser.add_argument(
         "-p",
         "--pts-only",
         action="store_true",
-        help="Only create and expose the PTS device",
-    )
-    group.add_argument(
-        "-w",
-        "--wrap-picocom",
-        action="store_true",
-        help="Wrap and run picocom on the PTS device",
-    )
-    group.add_argument(
-        "-r",
-        "--raw-output",
-        action="store_true",
-        help="Only print device_serial_output topic to stdout, no PTY or input",
+        help="Only create and expose the PTS device; do not attach stdin/stdout",
     )
     args = parser.parse_args()
 
     try:
-        if args.raw_output:
-            bridge = MQTTY(args.mqtt_uri, False)
-            bridge.start_threads()
-            try:
-                signal.signal(signal.SIGINT, lambda sig, frame: bridge.shutdown())
-                signal.pause()
-            except KeyboardInterrupt:
-                bridge.shutdown()
-            return
+        bridge = MQTTY(args.mqtt_uri, args.pts_only)
+        install_signal_handlers(bridge)
 
-        bridge = MQTTY(args.mqtt_uri, True)
-        if args.pts_only:
+        if args.pts_only and bridge.slave_name is not None:
             print(bridge.slave_name, flush=True)
+
         bridge.start_threads()
 
         if args.pts_only:
-            signal.signal(signal.SIGINT, lambda sig, frame: bridge.shutdown())
-            signal.pause()  # Wait until interrupted
-        elif args.wrap_picocom:
-            try:
-                if bridge.slave_name is not None:
-                    subprocess.run(["picocom", "--quiet", bridge.slave_name])
-                else:
-                    sys.stderr.write("Error: slave_name is not set.\n")
-            finally:
-                bridge.shutdown()
-
+            while not bridge.stop_event.wait(timeout=1):
+                pass
+        else:
+            bridge.stdio_to_mqtt()
     except ValueError as e:
         sys.stderr.write(f"Error: {e}\n")
+        raise SystemExit(1) from e
+    finally:
+        if "bridge" in locals():
+            bridge.shutdown()
 
 
 if __name__ == "__main__":
