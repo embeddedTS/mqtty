@@ -117,6 +117,34 @@ class LogIOTests(unittest.TestCase):
 
         self.assertEqual(second, (10.0, b"second"))
 
+    def test_followable_reader_detects_growth_seen_before_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            raw_path = Path(temp_dir) / "capture.jsonl"
+            compressed_path = normalize_compressed_log_path(raw_path)
+            writer = SerialLogWriter(raw_path, flush_interval_s=0.05)
+            try:
+                writer.write_record(0, b"first")
+                time.sleep(0.06)
+                writer.flush_if_due()
+
+                with FollowableSerialLogReader(compressed_path) as log_file:
+                    first = decode_serial_record(log_file.readline())
+                    self.assertEqual(first, (0.0, b"first"))
+                    self.assertEqual(log_file.readline(), "")
+
+                    writer.write_record(10, b"second")
+                    time.sleep(0.06)
+                    writer.flush_if_due()
+
+                    # Old decompressor instance has already reached EOF.
+                    self.assertEqual(log_file.readline(), "")
+                    self.assertTrue(log_file.refresh_if_grown())
+                    second = decode_serial_record(log_file.readline())
+            finally:
+                writer.close()
+
+        self.assertEqual(second, (10.0, b"second"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -135,7 +135,6 @@ class FollowableSerialLogReader:
             self._line_count += 1
             return line
 
-        self._last_size = self.path.stat().st_size
         return ""
 
     def refresh_if_grown(self) -> bool:
