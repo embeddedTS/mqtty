@@ -40,5 +40,31 @@ class ReplayerOutputTests(unittest.TestCase):
         write_bytes_mock.assert_called_once_with(b"Speed: 1.00x\r\n")
 
 
+class ReplayerFollowModeTests(unittest.TestCase):
+    def test_enter_live_follow_mode_resets_speed_and_instant(self) -> None:
+        replayer = Replayer(Path("capture.jsonl.zst"), follow=True)
+        replayer.speed_factor = 8.0
+        replayer.instant = True
+
+        with patch.object(replayer, "_announce_speed") as announce_speed_mock:
+            replayer._enter_live_follow_mode()
+            replayer._enter_live_follow_mode()
+
+        self.assertTrue(replayer.live_following)
+        self.assertEqual(replayer.speed_factor, 1.0)
+        self.assertFalse(replayer.instant)
+        announce_speed_mock.assert_called_once()
+
+    def test_enter_live_follow_mode_keeps_default_speed_silent(self) -> None:
+        replayer = Replayer(Path("capture.jsonl.zst"), follow=True)
+        with patch.object(replayer, "_announce_speed") as announce_speed_mock:
+            replayer._enter_live_follow_mode()
+
+        self.assertTrue(replayer.live_following)
+        self.assertEqual(replayer.speed_factor, 1.0)
+        self.assertFalse(replayer.instant)
+        announce_speed_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

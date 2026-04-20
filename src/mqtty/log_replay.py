@@ -51,6 +51,7 @@ class Replayer:
         self.speed_factor = 1.0
         self.instant = False
         self.pending_remaining = 0.0
+        self.live_following = False
 
     def _write_stdout_bytes(self, data: bytes) -> None:
         stdout_fd = sys.stdout.fileno()
@@ -151,6 +152,16 @@ class Replayer:
             self._print_remaining()
         return False
 
+    def _enter_live_follow_mode(self) -> None:
+        if self.live_following:
+            return
+
+        self.live_following = True
+        if self.instant or self.speed_factor != 1.0:
+            self.instant = False
+            self.speed_factor = 1.0
+            self._announce_speed()
+
     def _raw_dump(self) -> None:
         start = time.perf_counter()
         with FollowableSerialLogReader(self.log_path) as log_file:
@@ -185,6 +196,9 @@ class Replayer:
                 if not line:
                     self._handle_pending_keys()
                     if self.follow:
+                        if not self.live_following:
+                            self._enter_live_follow_mode()
+                            next_wall = time.perf_counter()
                         if log_file.refresh_if_grown():
                             continue
                         time.sleep(0.05)
@@ -196,6 +210,7 @@ class Replayer:
                 except Exception:
                     continue
 
+                self.live_following = False
                 delay_seconds = 0.0 if self.instant else (delay_ms / 1000.0) / self.speed_factor
                 next_wall += delay_seconds
 
