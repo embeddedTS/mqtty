@@ -12,6 +12,8 @@ authors = [
 ]
 dependencies = [
     "paho-mqtt",
+    "pyserial",
+    "tomli; python_version < '3.11'",
     "zstandard"
 ]
 
@@ -29,6 +31,7 @@ bugs = "https://github.com/embeddedts/mqtty/issues"
 mqtty = "mqtty.mqtty:main"
 mqtty-log = "mqtty.serial_log:main"
 mqtty-log-replay = "mqtty.log_replay:main"
+mqtty-serial-bridge = "mqtty.serial_bridge:main"
 
 [tool.mypy]
 files = "."
