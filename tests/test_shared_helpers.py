@@ -46,7 +46,7 @@ class LogIOTests(unittest.TestCase):
         self.assertEqual(delay_ms, 42.0)
         self.assertEqual(payload, b"\x00hello")
 
-    def test_plain_log_reader_supports_uncompressed_logs(self) -> None:
+    def test_replay_reader_supports_uncompressed_jsonl_logs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             log_path = Path(temp_dir) / "plain.jsonl"
             log_path.write_text(f"{encode_serial_record(3, b'plain')}\n", encoding="utf-8")
@@ -56,7 +56,7 @@ class LogIOTests(unittest.TestCase):
 
         self.assertEqual(records, [(3.0, b"plain")])
 
-    def test_compressed_log_writer_round_trip(self) -> None:
+    def test_log_writer_always_outputs_compressed_logs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             raw_path = Path(temp_dir) / "capture.jsonl"
             writer = SerialLogWriter(raw_path)

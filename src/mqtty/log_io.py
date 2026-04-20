@@ -8,19 +8,9 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, TextIO
 
+import zstandard as zstd
+
 ZSTD_MAGIC = b"\x28\xB5\x2F\xFD"
-
-zstd: Any | None
-try:
-    import zstandard as zstd
-except ImportError:
-    zstd = None
-
-
-def require_zstandard(error_message: str) -> Any:
-    if zstd is None:
-        raise RuntimeError(error_message)
-    return zstd
 
 
 def normalize_compressed_log_path(path: Path) -> Path:
@@ -52,12 +42,10 @@ def decode_serial_record(line: str) -> tuple[float, bytes]:
 
 class SerialLogWriter:
     def __init__(self, path: Path) -> None:
-        zstd_module = require_zstandard("Writing compressed logs requires the 'zstandard' module installed.")
-
         self.path = normalize_compressed_log_path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-        compressor = zstd_module.ZstdCompressor(level=5, write_content_size=False)
+        compressor = zstd.ZstdCompressor(level=5, write_content_size=False)
         self._raw_file = self.path.open("ab")
         self._compression_stream = compressor.stream_writer(self._raw_file)
         self._text_file = io.TextIOWrapper(self._compression_stream, encoding="utf-8")
@@ -95,8 +83,7 @@ def open_serial_log_reader(path: Path) -> Iterator[TextIO]:
 
         binary_stream: Any = raw_file
         if is_compressed:
-            zstd_module = require_zstandard("Reading compressed logs requires the 'zstandard' module installed.")
-            binary_stream = zstd_module.ZstdDecompressor().stream_reader(raw_file)
+            binary_stream = zstd.ZstdDecompressor().stream_reader(raw_file)
 
         text_stream = io.TextIOWrapper(binary_stream, encoding="utf-8", errors="ignore")
         yield text_stream

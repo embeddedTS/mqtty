@@ -157,7 +157,11 @@ class MQTTSerialLogMulti(BaseMQTTLogger):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Log MQTT serial output to replay files.")
     parser.add_argument("mqtt_uri", help="Base broker URI, for example mqtt://host/testbench/device")
-    parser.add_argument("--outfile", type=Path, help="Single output file path")
+    parser.add_argument(
+        "--outfile",
+        type=Path,
+        help="Single compressed output file path (.zst is added if omitted)",
+    )
     parser.add_argument("--outdir", type=Path, help="Base output directory for service mode")
     parser.add_argument("--service", action="store_true", help="Enable per-device log rotation mode")
     args = parser.parse_args()
@@ -175,9 +179,6 @@ def main() -> None:
 
         logger.run()
     except ValueError as error:
-        sys.stderr.write(f"Error: {error}\n")
-        raise SystemExit(1) from error
-    except RuntimeError as error:
         sys.stderr.write(f"Error: {error}\n")
         raise SystemExit(1) from error
 

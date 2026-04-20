@@ -26,11 +26,11 @@ Use `--pts-only` if you only want a PTY device:
 `mqtty-log` records `.../device_serial_output` into replay files:
 
 ```bash
-mqtty-log mqtt://<host>/<topic> --outfile capture.jsonl
+mqtty-log mqtt://<host>/<topic> --outfile capture.jsonl.zst
 mqtty-log mqtt://<host>/<topic> --service --outdir logs/
 ```
 
-* `--outfile` writes a single compressed replay file
+* `--outfile` writes a single compressed replay file and adds `.zst` if omitted
 * `--service --outdir` rotates per-device files under `<outdir>/<server>/<device>/YYYY-MM-DD_replay.jsonl.zst`
 
 `mqtty-log-replay` replays either plain or compressed replay logs:
@@ -38,6 +38,8 @@ mqtty-log mqtt://<host>/<topic> --service --outdir logs/
 ```bash
 mqtty-log-replay path/to/replay.jsonl.zst [--raw] [--follow] [--info]
 ```
+
+Raw `.jsonl` logs are still accepted for replay and inspection.
 
 The `<topic>` segment of the URI is used as the base path for MQTT messages across both live commands:
 
@@ -63,7 +65,7 @@ This prints the local PTY path and keeps it bridged to the same MQTT topics unti
 To capture a replay log while a device is running:
 
 ```bash
-mqtty-log mqtt://broker.local/mydevice --outfile mydevice.jsonl
+mqtty-log mqtt://broker.local/mydevice --outfile mydevice.jsonl.zst
 ```
 
 To inspect or replay that log later:

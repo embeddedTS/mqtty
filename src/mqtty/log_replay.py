@@ -201,7 +201,7 @@ class Replayer:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Replay an NDJSON serial log (plain or .zst) or inspect it.",
+        description="Replay a serial log (.jsonl or .jsonl.zst) or inspect it.",
     )
     parser.add_argument("log", type=Path, help="Path to replay.jsonl or replay.jsonl.zst")
     parser.add_argument(
@@ -224,15 +224,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    try:
-        replayer = Replayer(args.log, raw=args.raw, follow=args.follow)
-        if args.info:
-            replayer.info()
-        else:
-            replayer.run()
-    except RuntimeError as error:
-        sys.stderr.write(f"Error: {error}\n")
-        raise SystemExit(1) from error
+    replayer = Replayer(args.log, raw=args.raw, follow=args.follow)
+    if args.info:
+        replayer.info()
+    else:
+        replayer.run()
 
 
 if __name__ == "__main__":
