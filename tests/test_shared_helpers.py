@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from mqtty.log_io import (
+    SerialLogWriter,
+    decode_serial_record,
+    encode_serial_record,
+    normalize_compressed_log_path,
+    open_serial_log_reader,
+)
+from mqtty.mqtt_common import MQTTConnectionInfo
+
+
+class MQTTConnectionInfoTests(unittest.TestCase):
+    def test_parse_default_tcp_port(self) -> None:
+        connection = MQTTConnectionInfo.parse("mqtt://broker.local/site/device")
+
+        self.assertEqual(connection.host, "broker.local")
+        self.assertEqual(connection.port, 1883)
+        self.assertEqual(connection.transport, "tcp")
+        self.assertEqual(connection.topic("device_serial_output"), "site/device/device_serial_output")
+
+    def test_parse_default_websocket_port(self) -> None:
+        connection = MQTTConnectionInfo.parse("wss://broker.local/site/device")
+
+        self.assertEqual(connection.port, 443)
+        self.assertEqual(connection.transport, "websockets")
+
+    def test_topic_without_base_path(self) -> None:
+        connection = MQTTConnectionInfo.parse("mqtt://broker.local")
+
+        self.assertEqual(connection.topic("device_serial_input"), "device_serial_input")
+
+    def test_invalid_scheme_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            MQTTConnectionInfo.parse("http://broker.local/site/device")
+
+
+class LogIOTests(unittest.TestCase):
+    def test_encode_decode_round_trip(self) -> None:
+        delay_ms, payload = decode_serial_record(encode_serial_record(42, b"\x00hello"))
+
+        self.assertEqual(delay_ms, 42.0)
+        self.assertEqual(payload, b"\x00hello")
+
+    def test_plain_log_reader_supports_uncompressed_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "plain.jsonl"
+            log_path.write_text(f"{encode_serial_record(3, b'plain')}\n", encoding="utf-8")
+
+            with open_serial_log_reader(log_path) as log_file:
+                records = [decode_serial_record(line) for line in log_file]
+
+        self.assertEqual(records, [(3.0, b"plain")])
+
+    def test_compressed_log_writer_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            raw_path = Path(temp_dir) / "capture.jsonl"
+            writer = SerialLogWriter(raw_path)
+            try:
+                writer.write_record(0, b"hello")
+                writer.write_record(15, b"world")
+            finally:
+                writer.close()
+
+            compressed_path = normalize_compressed_log_path(raw_path)
+            self.assertTrue(compressed_path.exists())
+
+            with open_serial_log_reader(compressed_path) as log_file:
+                records = [decode_serial_record(line) for line in log_file]
+
+        self.assertEqual(records, [(0.0, b"hello"), (15.0, b"world")])
+
+
+if __name__ == "__main__":
+    unittest.main()
