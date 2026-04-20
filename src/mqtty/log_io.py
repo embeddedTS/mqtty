@@ -21,6 +21,12 @@ def normalize_compressed_log_path(path: Path) -> Path:
     return path.with_suffix(f"{path.suffix}.zst")
 
 
+def is_compressed_serial_log(path: Path) -> bool:
+    with path.open("rb") as raw_file:
+        header = _peek_header(raw_file, 4)
+    return path.suffix in {".zst", ".zstd"} or header.startswith(ZSTD_MAGIC)
+
+
 def encode_serial_record(delta_ms: int, payload: bytes) -> str:
     record = {
         "t": delta_ms,
@@ -99,6 +105,78 @@ class SerialLogWriter:
                 self._raw_file.close()
 
             self._closed = True
+
+
+class FollowableSerialLogReader:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._compressed = is_compressed_serial_log(path)
+        self._line_count = 0
+        self._last_size = path.stat().st_size
+        self._reader_manager: contextlib.AbstractContextManager[TextIO] | None = None
+        self._text_stream: TextIO | None = None
+
+    def __enter__(self) -> FollowableSerialLogReader:
+        self._open_reader()
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _tb: object,
+    ) -> None:
+        self.close()
+
+    def readline(self) -> str:
+        text_stream = self._require_text_stream()
+        line = text_stream.readline()
+        if line:
+            self._line_count += 1
+            return line
+
+        self._last_size = self.path.stat().st_size
+        return ""
+
+    def refresh_if_grown(self) -> bool:
+        if not self._compressed:
+            return False
+
+        current_size = self.path.stat().st_size
+        if current_size <= self._last_size:
+            return False
+
+        self._reopen_and_skip()
+        self._last_size = current_size
+        return True
+
+    def close(self) -> None:
+        if self._reader_manager is None:
+            return
+
+        self._reader_manager.__exit__(None, None, None)
+        self._reader_manager = None
+        self._text_stream = None
+
+    def _open_reader(self) -> None:
+        self._reader_manager = open_serial_log_reader(self.path)
+        self._text_stream = self._reader_manager.__enter__()
+
+    def _reopen_and_skip(self) -> None:
+        self.close()
+        self._open_reader()
+        text_stream = self._require_text_stream()
+        skipped = 0
+        while skipped < self._line_count:
+            line = text_stream.readline()
+            if not line:
+                break
+            skipped += 1
+
+    def _require_text_stream(self) -> TextIO:
+        if self._text_stream is None:
+            raise RuntimeError("Log reader is not open.")
+        return self._text_stream
 
 
 def _peek_header(raw_file: io.BufferedReader, size: int) -> bytes:

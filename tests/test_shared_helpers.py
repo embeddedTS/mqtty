@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from mqtty.log_io import (
+    FollowableSerialLogReader,
     SerialLogWriter,
     decode_serial_record,
     encode_serial_record,
@@ -91,6 +92,30 @@ class LogIOTests(unittest.TestCase):
                 writer.close()
 
         self.assertEqual(records, [(10.0, b"tail")])
+
+    def test_followable_reader_resumes_compressed_logs_after_growth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            raw_path = Path(temp_dir) / "capture.jsonl"
+            compressed_path = normalize_compressed_log_path(raw_path)
+            writer = SerialLogWriter(raw_path, flush_interval_s=0.05)
+            try:
+                writer.write_record(0, b"first")
+
+                with FollowableSerialLogReader(compressed_path) as log_file:
+                    first = decode_serial_record(log_file.readline())
+                    self.assertEqual(first, (0.0, b"first"))
+                    self.assertEqual(log_file.readline(), "")
+
+                    writer.write_record(10, b"second")
+                    time.sleep(0.06)
+                    writer.flush_if_due()
+
+                    self.assertTrue(log_file.refresh_if_grown())
+                    second = decode_serial_record(log_file.readline())
+            finally:
+                writer.close()
+
+        self.assertEqual(second, (10.0, b"second"))
 
 
 if __name__ == "__main__":

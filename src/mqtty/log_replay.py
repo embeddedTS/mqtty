@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mqtty.log_io import decode_serial_record, open_serial_log_reader
+from mqtty.log_io import FollowableSerialLogReader, decode_serial_record, open_serial_log_reader
 
 ESCAPE_SEQ = {
     b"\x1b[C": "RIGHT",
@@ -138,11 +138,13 @@ class Replayer:
 
     def _raw_dump(self) -> None:
         start = time.perf_counter()
-        with open_serial_log_reader(self.log_path) as log_file:
+        with FollowableSerialLogReader(self.log_path) as log_file:
             while True:
                 line = log_file.readline()
                 if not line:
                     if self.follow:
+                        if log_file.refresh_if_grown():
+                            continue
                         time.sleep(0.1)
                         continue
                     break
@@ -163,13 +165,15 @@ class Replayer:
         self._announce_speed()
         start = time.perf_counter()
 
-        with RawTerminal(), open_serial_log_reader(self.log_path) as log_file:
+        with RawTerminal(), FollowableSerialLogReader(self.log_path) as log_file:
             next_wall = time.perf_counter()
             while True:
                 line = log_file.readline()
                 if not line:
                     self._handle_pending_keys()
                     if self.follow:
+                        if log_file.refresh_if_grown():
+                            continue
                         time.sleep(0.05)
                         continue
                     break
