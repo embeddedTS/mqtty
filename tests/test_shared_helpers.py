@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,23 @@ class LogIOTests(unittest.TestCase):
                 records = [decode_serial_record(line) for line in log_file]
 
         self.assertEqual(records, [(0.0, b"hello"), (15.0, b"world")])
+
+    def test_log_writer_flushes_pending_data_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            raw_path = Path(temp_dir) / "capture.jsonl"
+            compressed_path = normalize_compressed_log_path(raw_path)
+            writer = SerialLogWriter(raw_path, flush_interval_s=0.05)
+            try:
+                writer.write_record(10, b"tail")
+                time.sleep(0.06)
+                writer.flush_if_due()
+
+                with open_serial_log_reader(compressed_path) as log_file:
+                    records = [decode_serial_record(line) for line in log_file]
+            finally:
+                writer.close()
+
+        self.assertEqual(records, [(10.0, b"tail")])
 
 
 if __name__ == "__main__":

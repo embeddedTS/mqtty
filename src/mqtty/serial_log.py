@@ -45,6 +45,8 @@ def prefix_log_path(outdir: Path, key: TopicKey, date_str: str) -> Path:
 
 
 class BaseMQTTLogger:
+    flush_interval_s = 0.25
+
     def __init__(self, mqtt_uri: str, subscribe_pattern: str) -> None:
         self.connection = MQTTConnectionInfo.parse(mqtt_uri)
         self.subscribe_topic = self.connection.topic(subscribe_pattern)
@@ -87,6 +89,9 @@ class BaseMQTTLogger:
     def _on_message(self, _client: Client, _userdata: object, _msg: MQTTMessage) -> None:
         raise NotImplementedError
 
+    def _flush_logs(self) -> None:
+        return
+
     def run(self) -> None:
         try:
             threading.Thread(
@@ -95,9 +100,10 @@ class BaseMQTTLogger:
                 daemon=True,
             ).start()
             print("Logging; press Ctrl+C to stop")
-            while not self.stop_event.is_set():
-                time.sleep(0.2)
+            while not self.stop_event.wait(self.flush_interval_s):
+                self._flush_logs()
         finally:
+            self._flush_logs()
             self.client.disconnect()
 
 
@@ -121,6 +127,9 @@ class MQTTSerialLogger(BaseMQTTLogger):
             super().run()
         finally:
             self.writer.close()
+
+    def _flush_logs(self) -> None:
+        self.writer.flush_if_due()
 
 
 class MQTTSerialPrefixLogger(BaseMQTTLogger):
@@ -172,6 +181,13 @@ class MQTTSerialPrefixLogger(BaseMQTTLogger):
         finally:
             for writer in self.writers.values():
                 writer.close()
+
+    def _flush_logs(self) -> None:
+        with self.lock:
+            writers = list(self.writers.values())
+
+        for writer in writers:
+            writer.flush_if_due()
 
 
 def build_parser() -> argparse.ArgumentParser:
