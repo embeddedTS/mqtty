@@ -55,10 +55,9 @@ And publishes:
 
 * `<topic_base>/<port>/device_serial_output`
 
-Default config lookup order:
+Default config path:
 
 1. `/etc/mqtty-serial-bridge.toml`
-2. `/etc/uart2mqtt.toml` (legacy fallback)
 
 The `<topic>` segment of the URI is used as the base path for MQTT messages across both live commands:
 

@@ -22,7 +22,6 @@ except ModuleNotFoundError:  # pragma: no cover - python <3.11
 
 DEFAULT_CONFIG_PATHS = [
     Path('/etc/mqtty-serial-bridge.toml'),
-    Path('/etc/uart2mqtt.toml'),
 ]
 DEFAULT_SERIAL_BASE_PATH = Path('/dev/serial/by-path')
 DEFAULT_BAUD_RATE = 115200
@@ -407,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--config',
         type=Path,
         default=None,
-        help='Path to config TOML file (defaults: /etc/mqtty-serial-bridge.toml then /etc/uart2mqtt.toml)',
+        help='Path to config TOML file (default: /etc/mqtty-serial-bridge.toml)',
     )
     parser.add_argument(
         '--serial-base-path',
