@@ -26,12 +26,12 @@ Use `--pts-only` if you only want a PTY device:
 `mqtty-log` records `.../device_serial_output` into replay files:
 
 ```bash
-mqtty-log mqtt://<host>/<topic> --outfile capture.jsonl.zst
-mqtty-log mqtt://<host>/<topic> --service --outdir logs/
+mqtty-log device mqtt://<host>/<serial-server>/<device> capture.jsonl.zst
+mqtty-log prefix mqtt://<host>/<topic-prefix> logs/
 ```
 
-* `--outfile` writes a single compressed replay file and adds `.zst` if omitted
-* `--service --outdir` rotates per-device files under `<outdir>/<server>/<device>/YYYY-MM-DD_replay.jsonl.zst`
+* `device` records one full device URL into a single compressed replay file and adds `.zst` if omitted
+* `prefix` subscribes to `<topic-prefix>/#`, keeps topics ending in `device_serial_output`, and rotates per-device logs under `<outdir>/<topic-path-below-prefix>/YYYY-MM-DD_replay.jsonl.zst`
 
 `mqtty-log-replay` replays either plain or compressed replay logs:
 
@@ -65,7 +65,14 @@ This prints the local PTY path and keeps it bridged to the same MQTT topics unti
 To capture a replay log while a device is running:
 
 ```bash
-mqtty-log mqtt://broker.local/mydevice --outfile mydevice.jsonl.zst
+mqtty-log device mqtt://broker.local/mydevice mydevice.jsonl.zst
+```
+
+To capture every device under one serial-server or a broader base prefix:
+
+```bash
+mqtty-log prefix mqtt://broker.local/testbench/mark-pantry logs/
+mqtty-log prefix mqtt://broker.local/testbench logs/
 ```
 
 To inspect or replay that log later:

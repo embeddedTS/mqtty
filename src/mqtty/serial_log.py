@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from paho.mqtt.client import Client, MQTTMessage
 from paho.mqtt.properties import Properties
@@ -16,13 +16,38 @@ from paho.mqtt.reasoncodes import ReasonCode
 from mqtty.log_io import SerialLogWriter
 from mqtty.mqtt_common import MQTTConnectionInfo, connect_and_loop_forever, create_client
 
-DeviceKey = tuple[str, str]
+SERIAL_OUTPUT_TOPIC = "device_serial_output"
+TopicKey = tuple[str, ...]
+
+
+def split_topic_path(topic: str) -> tuple[str, ...]:
+    return tuple(part for part in topic.split("/") if part)
+
+
+def prefix_log_key(prefix_path: str, topic: str) -> TopicKey | None:
+    prefix_parts = split_topic_path(prefix_path)
+    topic_parts = split_topic_path(topic)
+
+    if len(topic_parts) <= len(prefix_parts) or topic_parts[-1] != SERIAL_OUTPUT_TOPIC:
+        return None
+    if topic_parts[: len(prefix_parts)] != prefix_parts:
+        return None
+
+    relative_parts = topic_parts[len(prefix_parts) : -1]
+    if not relative_parts:
+        return None
+
+    return relative_parts
+
+
+def prefix_log_path(outdir: Path, key: TopicKey, date_str: str) -> Path:
+    return outdir.joinpath(*key) / f"{date_str}_replay.jsonl.zst"
 
 
 class BaseMQTTLogger:
-    def __init__(self, mqtt_uri: str) -> None:
+    def __init__(self, mqtt_uri: str, subscribe_pattern: str) -> None:
         self.connection = MQTTConnectionInfo.parse(mqtt_uri)
-        self.subscribe_topic = self.connection.topic("device_serial_output")
+        self.subscribe_topic = self.connection.topic(subscribe_pattern)
         self.client = create_client(self.connection)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
@@ -78,7 +103,7 @@ class BaseMQTTLogger:
 
 class MQTTSerialLogger(BaseMQTTLogger):
     def __init__(self, mqtt_uri: str, outfile: Path) -> None:
-        super().__init__(mqtt_uri)
+        super().__init__(mqtt_uri, SERIAL_OUTPUT_TOPIC)
         self.writer = SerialLogWriter(outfile)
         self.lock = threading.Lock()
         self.prev_time_ms: int | None = None
@@ -98,25 +123,21 @@ class MQTTSerialLogger(BaseMQTTLogger):
             self.writer.close()
 
 
-class MQTTSerialLogMulti(BaseMQTTLogger):
+class MQTTSerialPrefixLogger(BaseMQTTLogger):
     def __init__(self, mqtt_uri: str, outdir: Path) -> None:
-        super().__init__(mqtt_uri)
+        super().__init__(mqtt_uri, "#")
         self.outdir = outdir
         self.outdir.mkdir(parents=True, exist_ok=True)
-        self.writers: dict[DeviceKey, SerialLogWriter] = {}
-        self.prev_time_ms: dict[DeviceKey, int | None] = {}
-        self.current_date: dict[DeviceKey, str] = {}
+        self.writers: dict[TopicKey, SerialLogWriter] = {}
+        self.prev_time_ms: dict[TopicKey, int | None] = {}
+        self.current_date: dict[TopicKey, str] = {}
         self.lock = threading.Lock()
 
     def _on_message(self, _client: Client, _userdata: object, msg: MQTTMessage) -> None:
-        parts = msg.topic.split("/")
-        try:
-            server, device = parts[-3], parts[-2]
-        except IndexError:
-            sys.stderr.write(f"Unexpected topic format: {msg.topic}\n")
+        key = prefix_log_key(self.connection.base_path, msg.topic)
+        if key is None:
             return
 
-        key = (server, device)
         now_ms = time.time_ns() // 1_000_000
         date_str = dt.date.fromtimestamp(now_ms / 1000).isoformat()
 
@@ -131,18 +152,17 @@ class MQTTSerialLogMulti(BaseMQTTLogger):
             self.prev_time_ms[key] = now_ms
             self.writers[key].write_record(delay_ms, msg.payload)
 
-    def _log_path(self, key: DeviceKey, date_str: str) -> Path:
-        server, device = key
-        return self.outdir / server / device / f"{date_str}_replay.jsonl.zst"
+    def _log_path(self, key: TopicKey, date_str: str) -> Path:
+        return prefix_log_path(self.outdir, key, date_str)
 
-    def _open_log_writer(self, key: DeviceKey, date_str: str) -> None:
+    def _open_log_writer(self, key: TopicKey, date_str: str) -> None:
         writer = SerialLogWriter(self._log_path(key, date_str))
         self.writers[key] = writer
         self.prev_time_ms[key] = None
         self.current_date[key] = date_str
-        print(f"Logging {key} -> {writer.path}")
+        print(f"Logging {'/'.join(key)} -> {writer.path}")
 
-    def _rotate_log_writer(self, key: DeviceKey, new_date: str) -> None:
+    def _rotate_log_writer(self, key: TopicKey, new_date: str) -> None:
         self.writers[key].close()
         self._open_log_writer(key, new_date)
 
@@ -154,28 +174,47 @@ class MQTTSerialLogMulti(BaseMQTTLogger):
                 writer.close()
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Log MQTT serial output to replay files.")
-    parser.add_argument("mqtt_uri", help="Base broker URI, for example mqtt://host/testbench/device")
-    parser.add_argument(
-        "--outfile",
-        type=Path,
-        help="Single compressed output file path (.zst is added if omitted)",
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    device_parser = subparsers.add_parser(
+        "device",
+        help="Log one full device URL to a compressed replay file.",
     )
-    parser.add_argument("--outdir", type=Path, help="Base output directory for service mode")
-    parser.add_argument("--service", action="store_true", help="Enable per-device log rotation mode")
+    device_parser.add_argument("mqtt_uri", help="Full device MQTT URI")
+    device_parser.add_argument(
+        "logfile",
+        type=Path,
+        help="Compressed replay file path (.zst is added if omitted)",
+    )
+
+    prefix_parser = subparsers.add_parser(
+        "prefix",
+        help="Log all descendant device output under an MQTT topic prefix.",
+    )
+    prefix_parser.add_argument("mqtt_uri", help="MQTT URI prefix above one or more devices")
+    prefix_parser.add_argument(
+        "outdir",
+        type=Path,
+        help="Base directory for rotated per-device replay logs",
+    )
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     try:
         logger: BaseMQTTLogger
-        if args.service:
-            if args.outdir is None:
-                parser.error("--outdir is required in service mode")
-            logger = MQTTSerialLogMulti(args.mqtt_uri, args.outdir)
+        if args.command == "device":
+            logger = MQTTSerialLogger(args.mqtt_uri, args.logfile)
+        elif args.command == "prefix":
+            logger = MQTTSerialPrefixLogger(args.mqtt_uri, args.outdir)
         else:
-            if args.outfile is None:
-                parser.error("--outfile is required unless --service is set")
-            logger = MQTTSerialLogger(args.mqtt_uri, args.outfile)
+            parser.error(f"Unknown command: {args.command}")
 
         logger.run()
     except ValueError as error:
