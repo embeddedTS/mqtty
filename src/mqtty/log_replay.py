@@ -52,6 +52,23 @@ class Replayer:
         self.instant = False
         self.pending_remaining = 0.0
 
+    def _write_stdout_bytes(self, data: bytes) -> None:
+        stdout_fd = sys.stdout.fileno()
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(stdout_fd, view)
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
+
+            if written == 0:
+                raise BlockingIOError("stdout write returned zero bytes")
+            view = view[written:]
+
+    def _write_stdout_text(self, message: str) -> None:
+        self._write_stdout_bytes(message.encode("utf-8"))
+
     def info(self) -> None:
         byte_size = self.log_path.stat().st_size
         line_count = 0
@@ -97,8 +114,7 @@ class Replayer:
             message = "Speed: instant\r\n"
         else:
             message = f"Speed: {self.speed_factor:.2f}x\r\n"
-        sys.stdout.write(message)
-        sys.stdout.flush()
+        self._write_stdout_text(message)
 
     def _print_remaining(self) -> None:
         if self.instant:
@@ -106,8 +122,7 @@ class Replayer:
         else:
             delay_ms = max(self.pending_remaining, 0.0) * 1000
             message = f"Delay remaining: {delay_ms:.0f} ms\r\n"
-        sys.stdout.write(message)
-        sys.stdout.flush()
+        self._write_stdout_text(message)
 
     def _set_speed(self, new_factor: float) -> None:
         self.speed_factor = max(0.01, min(100.0, new_factor))
@@ -154,9 +169,7 @@ class Replayer:
                 except Exception:
                     continue
 
-                sys.stdout.buffer.write(payload)
-
-        sys.stdout.flush()
+                self._write_stdout_bytes(payload)
         elapsed = time.perf_counter() - start
         print(f"\n===== Replay complete: {elapsed:.3f} s wall-time =====")
 
@@ -196,8 +209,7 @@ class Replayer:
                         break
                     time.sleep(min(0.02, remaining))
 
-                sys.stdout.buffer.write(payload)
-                sys.stdout.flush()
+                self._write_stdout_bytes(payload)
 
         elapsed = time.perf_counter() - start
         print(f"\n===== Replay complete: {elapsed:.3f} s wall-time =====")
