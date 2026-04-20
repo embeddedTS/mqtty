@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from mqtty import log_replay
 from mqtty.log_replay import Replayer
 
 
@@ -64,6 +65,28 @@ class ReplayerFollowModeTests(unittest.TestCase):
         self.assertEqual(replayer.speed_factor, 1.0)
         self.assertFalse(replayer.instant)
         announce_speed_mock.assert_not_called()
+
+
+class LogReplayMainTests(unittest.TestCase):
+    def test_main_returns_130_on_keyboard_interrupt(self) -> None:
+        with (
+            patch("mqtty.log_replay.sys.argv", ["mqtty-log-replay", "capture.jsonl.zst"]),
+            patch("mqtty.log_replay.Replayer") as replayer_cls,
+        ):
+            replayer_cls.return_value.run.side_effect = KeyboardInterrupt()
+            rc = log_replay.main()
+
+        self.assertEqual(rc, 130)
+
+    def test_main_returns_zero_on_success(self) -> None:
+        with (
+            patch("mqtty.log_replay.sys.argv", ["mqtty-log-replay", "capture.jsonl.zst"]),
+            patch("mqtty.log_replay.Replayer") as replayer_cls,
+        ):
+            rc = log_replay.main()
+
+        self.assertEqual(rc, 0)
+        replayer_cls.return_value.run.assert_called_once_with()
 
 
 if __name__ == "__main__":

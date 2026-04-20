@@ -230,7 +230,7 @@ class Replayer:
         print(f"\n===== Replay complete: {elapsed:.3f} s wall-time =====")
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Replay a serial log (.jsonl or .jsonl.zst) or inspect it.",
     )
@@ -256,11 +256,17 @@ def main() -> None:
     args = parser.parse_args()
 
     replayer = Replayer(args.log, raw=args.raw, follow=args.follow)
-    if args.info:
-        replayer.info()
-    else:
-        replayer.run()
+    try:
+        if args.info:
+            replayer.info()
+        else:
+            replayer.run()
+    except KeyboardInterrupt:
+        print()
+        return 130
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
