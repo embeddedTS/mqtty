@@ -41,6 +41,25 @@ mqtty-log-replay path/to/replay.jsonl.zst [--raw] [--follow] [--info]
 
 Raw `.jsonl` logs are still accepted for replay and inspection.
 
+`mqtty-serial-bridge` discovers local serial devices and bridges them to MQTT:
+
+```bash
+mqtty-serial-bridge [--config /etc/mqtty-serial-bridge.toml]
+```
+
+It subscribes to:
+
+* `<topic_base>/<port>/device_serial_input`
+
+And publishes:
+
+* `<topic_base>/<port>/device_serial_output`
+
+Default config lookup order:
+
+1. `/etc/mqtty-serial-bridge.toml`
+2. `/etc/uart2mqtt.toml` (legacy fallback)
+
 The `<topic>` segment of the URI is used as the base path for MQTT messages across both live commands:
 
 * `.../device_serial_input` receives bytes from local input and sends them to the device
@@ -80,6 +99,12 @@ To inspect or replay that log later:
 ```bash
 mqtty-log-replay mydevice.jsonl.zst --info
 mqtty-log-replay mydevice.jsonl.zst
+```
+
+To run the serial bridge:
+
+```bash
+mqtty-serial-bridge
 ```
 
 ## License

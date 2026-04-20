@@ -1,0 +1,13 @@
+[Unit]
+Description=MQTTY Serial Bridge
+After=network.target
+
+[Service]
+ExecStart=mqtty-serial-bridge
+Restart=always
+User=your_user
+Group=your_group
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
