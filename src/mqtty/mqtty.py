@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import contextlib
 import os
@@ -8,13 +10,14 @@ import sys
 import termios
 import threading
 import tty
-from typing import Any, Dict, Iterator, Literal, Optional
-from urllib.parse import urlparse
+from collections.abc import Iterator
+from typing import Any, Optional
 
 from paho.mqtt.client import Client, MQTTMessage
-from paho.mqtt.enums import CallbackAPIVersion
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
+
+from mqtty.mqtt_common import MQTTConnectionInfo, connect_and_loop_forever, create_client
 
 
 PICOCOM_ESCAPE = 0x01
@@ -37,29 +40,13 @@ def raw_tty_mode(fd: int) -> Iterator[None]:
 
 class MQTTY:
     def __init__(self, mqtt_uri: str, use_pty: bool) -> None:
-        self.mqtt_uri = urlparse(mqtt_uri)
+        self.connection = MQTTConnectionInfo.parse(mqtt_uri)
         self.use_pty = use_pty
 
-        if self.mqtt_uri.scheme not in ["mqtt", "ws", "wss"]:
-            raise ValueError("Invalid URI scheme. Expected 'mqtt://', 'ws://', or 'wss://'.")
+        self.device_serial_input_topic = self.connection.topic("device_serial_input")
+        self.device_serial_output_topic = self.connection.topic("device_serial_output")
 
-        self.mqtt_host = self.mqtt_uri.hostname
-        if self.mqtt_host is None:
-            raise ValueError("MQTT URI must include a hostname.")
-        default_ports = {"mqtt": 1883, "ws": 80, "wss": 443}
-        self.mqtt_port = self.mqtt_uri.port or default_ports[self.mqtt_uri.scheme]
-        self.mqtt_transport: Literal["tcp", "websockets"] = (
-            "websockets" if self.mqtt_uri.scheme in ["ws", "wss"] else "tcp"
-        )
-
-        base_path = self.mqtt_uri.path.lstrip("/")  # Remove leading slash from path
-        self.device_serial_input_topic = f"{base_path}/device_serial_input"
-        self.device_serial_output_topic = f"{base_path}/device_serial_output"
-
-        self.mqtt_client = Client(
-            transport=self.mqtt_transport,
-            callback_api_version=CallbackAPIVersion.VERSION2,
-        )
+        self.mqtt_client = create_client(self.connection)
 
         self.master_fd: Optional[int] = None
         self.slave_fd: Optional[int] = None
@@ -92,10 +79,11 @@ class MQTTY:
         def on_connect(
             client: Client,
             userdata: Any,
-            flags: Dict[str, Any],
+            flags: dict[str, Any],
             reason_code: ReasonCode,
             properties: Optional[Properties],
         ) -> None:
+            del userdata, flags, properties
             if reason_code == 0:
                 self.connected = True
                 self.connected_event.set()
@@ -109,6 +97,7 @@ class MQTTY:
             reason_code: ReasonCode | int | None,
             properties: Optional[Properties],
         ) -> None:
+            del client, userdata, properties
             self.connected = False
             self.connected_event.clear()
 
@@ -116,8 +105,7 @@ class MQTTY:
         self.mqtt_client.on_disconnect = on_disconnect
 
         try:
-            self.mqtt_client.connect_async(self.mqtt_host, self.mqtt_port)
-            self.mqtt_client.loop_forever()
+            connect_and_loop_forever(self.mqtt_client, self.connection)
         except Exception as e:
             sys.stderr.write(f"MQTT connection failed: {e}\n")
         finally:
@@ -223,10 +211,12 @@ class MQTTY:
             self.mqtt_client.disconnect()
         if self.use_pty:
             if self.master_fd is not None:
-                os.close(self.master_fd)
+                with contextlib.suppress(OSError):
+                    os.close(self.master_fd)
                 self.master_fd = None
             if self.slave_fd is not None:
-                os.close(self.slave_fd)
+                with contextlib.suppress(OSError):
+                    os.close(self.slave_fd)
                 self.slave_fd = None
 
 
