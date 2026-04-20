@@ -3,9 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from mqtty.serial_bridge import (
     DEVICE_SERIAL_INPUT_TOPIC,
+    MQTTBridgeConfig,
+    SerialBridge,
+    SerialBridgeConfig,
     extract_port_name,
     join_topic_path,
     load_config,
@@ -98,6 +102,33 @@ class SerialBridgeConfigTests(unittest.TestCase):
 
     def test_device_serial_input_topic_name_constant(self) -> None:
         self.assertEqual(DEVICE_SERIAL_INPUT_TOPIC, 'device_serial_input')
+
+
+class _EqZeroNoInt:
+    def __eq__(self, other: object) -> bool:
+        return other == 0
+
+    def __str__(self) -> str:
+        return 'Success'
+
+
+class SerialBridgeMQTTTests(unittest.TestCase):
+    def test_mqtt_connect_accepts_non_int_reason_code(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+            usb_match=None,
+        )
+        bridge = SerialBridge(cfg)
+        mqtt_client = MagicMock()
+        bridge.mqtt_client = mqtt_client
+
+        bridge.mqtt_connect()
+
+        callback = bridge.mqtt_client.on_connect
+        callback_client = MagicMock()
+        callback(callback_client, None, {}, _EqZeroNoInt(), None)
+
+        callback_client.subscribe.assert_called_once_with('testbench/mark-desktop/+/device_serial_input')
 
 
 if __name__ == '__main__':

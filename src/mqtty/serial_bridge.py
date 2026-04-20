@@ -184,7 +184,7 @@ class SerialBridge:
             reason_code: ReasonCode,
             _properties: Properties | None,
         ) -> None:
-            if int(reason_code) == 0:
+            if reason_code == 0:
                 logger.info('Connected to MQTT broker')
                 client.subscribe(self.input_subscribe_topic)
             else:
