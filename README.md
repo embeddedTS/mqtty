@@ -32,6 +32,7 @@ mqtty-log prefix mqtt://<host>/<topic-prefix> logs/
 
 * `device` records one full device URL into a single compressed replay file and adds `.zst` if omitted
 * `prefix` subscribes to `<topic-prefix>/#`, keeps topics ending in `device_serial_output`, and rotates per-device logs under `<outdir>/<topic-path-below-prefix>/YYYY-MM-DD_replay.jsonl.zst`
+* each replay record stores an absolute Unix epoch timestamp in milliseconds (`ts`) before relative delay (`t`) and payload (`d`)
 
 `mqtty-log-replay` replays either plain or compressed replay logs:
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -47,6 +48,20 @@ class LogIOTests(unittest.TestCase):
 
         self.assertEqual(delay_ms, 42.0)
         self.assertEqual(payload, b"\x00hello")
+
+    def test_encode_includes_epoch_timestamp_first(self) -> None:
+        line = encode_serial_record(42, b"hello", epoch_ms=1_746_123_456_789)
+        self.assertTrue(line.startswith('{"ts":1746123456789,'))
+
+        record = json.loads(line)
+        self.assertEqual(record["ts"], 1_746_123_456_789)
+        self.assertEqual(record["t"], 42)
+
+    def test_decode_supports_legacy_records_without_timestamp(self) -> None:
+        delay_ms, payload = decode_serial_record('{"t":7,"d":"aGVsbG8="}')
+
+        self.assertEqual(delay_ms, 7.0)
+        self.assertEqual(payload, b"hello")
 
     def test_replay_reader_supports_uncompressed_jsonl_logs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -120,7 +120,7 @@ class MQTTSerialLogger(BaseMQTTLogger):
         self.prev_time_ms = now_ms
 
         with self.lock:
-            self.writer.write_record(delay_ms, msg.payload)
+            self.writer.write_record(delay_ms, msg.payload, epoch_ms=now_ms)
 
     def run(self) -> None:
         try:
@@ -159,7 +159,7 @@ class MQTTSerialPrefixLogger(BaseMQTTLogger):
             last_ms = self.prev_time_ms[key]
             delay_ms = 0 if last_ms is None else now_ms - last_ms
             self.prev_time_ms[key] = now_ms
-            self.writers[key].write_record(delay_ms, msg.payload)
+            self.writers[key].write_record(delay_ms, msg.payload, epoch_ms=now_ms)
 
     def _log_path(self, key: TopicKey, date_str: str) -> Path:
         return prefix_log_path(self.outdir, key, date_str)

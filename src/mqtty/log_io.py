@@ -27,8 +27,10 @@ def is_compressed_serial_log(path: Path) -> bool:
     return path.suffix in {".zst", ".zstd"} or header.startswith(ZSTD_MAGIC)
 
 
-def encode_serial_record(delta_ms: int, payload: bytes) -> str:
+def encode_serial_record(delta_ms: int, payload: bytes, epoch_ms: int | None = None) -> str:
+    timestamp_ms = time.time_ns() // 1_000_000 if epoch_ms is None else epoch_ms
     record = {
+        "ts": timestamp_ms,
         "t": delta_ms,
         "d": base64.b64encode(payload).decode("ascii"),
     }
@@ -63,12 +65,12 @@ class SerialLogWriter:
         self._compression_stream = compressor.stream_writer(self._raw_file)
         self._text_file = io.TextIOWrapper(self._compression_stream, encoding="utf-8")
 
-    def write_record(self, delta_ms: int, payload: bytes) -> None:
+    def write_record(self, delta_ms: int, payload: bytes, epoch_ms: int | None = None) -> None:
         with self._lock:
             if self._closed:
                 raise ValueError("I/O operation on closed log writer.")
 
-            self._text_file.write(encode_serial_record(delta_ms, payload))
+            self._text_file.write(encode_serial_record(delta_ms, payload, epoch_ms=epoch_ms))
             self._text_file.write("\n")
             self._dirty = True
 
