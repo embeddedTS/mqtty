@@ -106,6 +106,30 @@ To run the serial bridge:
 mqtty-serial-bridge
 ```
 
+## Testing
+
+Run the test suite with:
+
+```bash
+pytest
+```
+
+Integration tests in `tests/test_integration_mqtt_apps.py` spin up a temporary local `mosquitto` broker and use Linux PTYs (`pty.openpty`) as fake serial devices.
+
+Integration tests require `mosquitto` and fail if it is not available on `PATH`.
+
+Repeatable Docker run (includes `mosquitto` in the container):
+
+```bash
+./scripts/run-tests-docker.sh
+```
+
+Show each executed test (verbose):
+
+```bash
+./scripts/run-tests-docker.sh --verbose
+```
+
 ## License
 
 MIT

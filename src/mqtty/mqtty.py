@@ -96,6 +96,7 @@ class MQTTY:
             userdata: Any,
             reason_code: ReasonCode | int | None,
             properties: Optional[Properties],
+            *_packet_from_broker: object,
         ) -> None:
             del client, userdata, properties
             self.connected = False

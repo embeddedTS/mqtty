@@ -1,0 +1,22 @@
+ARG PYTHON_VERSION=3.13
+FROM python:${PYTHON_VERSION}-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MQTTY=0.0.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mosquitto \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+COPY tests ./tests
+
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -e . pytest
+
+CMD ["pytest", "-q"]
