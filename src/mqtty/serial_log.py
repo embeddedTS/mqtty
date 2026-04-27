@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import signal
 import sys
 import threading
@@ -80,10 +81,10 @@ class BaseMQTTLogger:
         _properties: Properties | None,
         *_packet_from_broker: object,
     ) -> None:
-        print(f"Disconnected rc={reason_code}", flush=True)
+        sys.stderr.write(f"Disconnected rc={reason_code}\n")
 
     def _signal_handler(self, signum: int, _frame: object) -> None:
-        print(f"Received signal {signum}; shutting down...", file=sys.stderr)
+        os.write(sys.stderr.fileno(), f"Received signal {signum}; shutting down...\n".encode())
         self.stop_event.set()
 
     def _on_message(self, _client: Client, _userdata: object, _msg: MQTTMessage) -> None:
@@ -169,7 +170,7 @@ class MQTTSerialPrefixLogger(BaseMQTTLogger):
         self.writers[key] = writer
         self.prev_time_ms[key] = None
         self.current_date[key] = date_str
-        print(f"Logging {'/'.join(key)} -> {writer.path}")
+        sys.stderr.write(f"Logging {'/'.join(key)} -> {writer.path}\n")
 
     def _rotate_log_writer(self, key: TopicKey, new_date: str) -> None:
         self.writers[key].close()
