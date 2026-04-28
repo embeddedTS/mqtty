@@ -54,6 +54,8 @@ class MQTTY:
 
         if self.use_pty:
             self.master_fd, self.slave_fd = pty.openpty()
+            if self.slave_fd is not None:
+                tty.setraw(self.slave_fd)
             self.slave_name = os.ttyname(self.slave_fd)
 
         self.connected = False

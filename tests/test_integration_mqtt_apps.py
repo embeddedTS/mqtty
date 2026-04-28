@@ -11,7 +11,6 @@ import subprocess
 import tempfile
 import threading
 import time
-import tty
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -204,7 +203,6 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
 
         slave_fd = os.open(str(bridge.slave_name), os.O_RDWR | os.O_NOCTTY)
         self.addCleanup(lambda: os.close(slave_fd))
-        tty.setraw(slave_fd)
 
         subscriber = MQTTTestClient("127.0.0.1", self.broker.port)
         self.addCleanup(subscriber.close)
@@ -234,7 +232,6 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
             master_fd, slave_fd = pty.openpty()
             self.addCleanup(lambda: os.close(master_fd))
             self.addCleanup(lambda: os.close(slave_fd))
-            tty.setraw(slave_fd)
 
             slave_path = os.ttyname(slave_fd)
             os.symlink(slave_path, serial_base / port_name)
@@ -298,7 +295,6 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
             master_fd, slave_fd = pty.openpty()
             self.addCleanup(lambda: os.close(master_fd))
             self.addCleanup(lambda: os.close(slave_fd))
-            tty.setraw(slave_fd)
 
             slave_path = os.ttyname(slave_fd)
             os.symlink(slave_path, serial_base / port_name)
