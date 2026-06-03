@@ -8,6 +8,7 @@ This is useful for debugging, automation, or tunneling serial communication thro
 
 ```bash
 mqtty mqtt://<host>/<topic> [--pts-only]
+mqtty --list mqtt://<host>/<topic-base>
 ```
 
 `mqtty` runs in bidirectional terminal mode by default:
@@ -22,6 +23,13 @@ Use `--pts-only` if you only want a PTY device:
 
 * `--pts-only`, `-p`:
   Print the path to the PTS device and keep it open without attaching local stdin/stdout. Useful for tools or scripts that want to use the virtual serial port.
+
+Use `--list` to discover serial ports below a base topic:
+
+* `--list`, `-l`:
+  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print matching serial URLs, and exit.
+* `--list-timeout`:
+  Seconds to wait for retained discovery messages. Defaults to `1.0`.
 
 `mqtty-log` records `.../device_serial_output` into replay files:
 
@@ -55,6 +63,21 @@ It subscribes to:
 And publishes:
 
 * `<topic_base>/<port>/device_serial_output`
+* retained `<topic_base>/<port>/_mqtty/available`
+
+The retained availability payload is JSON:
+
+```json
+{"port":"<port>","alias":"<alias>"}
+```
+
+The MQTT broker stores retained discovery messages, so clients only need to connect to the broker. The bridge does not use a database. Removed ports may remain listed until retained messages are cleared from the broker.
+
+Port aliases are resolved in this order:
+
+1. `[serial_aliases]` entries in the bridge config
+2. `<serial-base-path>/<port>.alias` text files
+3. the resolved local device path, such as `/dev/ttyACM0`
 
 Default config path:
 
@@ -105,6 +128,20 @@ To run the serial bridge:
 
 ```bash
 mqtty-serial-bridge
+```
+
+To list retained serial bridge ports under a base topic:
+
+```bash
+mqtty --list mqtt://broker.local/testbench/serial
+mqtty --list mqtt://broker.local/testbench/
+```
+
+Example output:
+
+```text
+mqtt://broker.local/testbench/serial/platform-ci_hdrc.1-usb-0:1.2:1.0 (/dev/ttyACM0)
+mqtt://broker.local/testbench/mark-desktop/platform-ci_hdrc.1-usb-0:1.2:1.0 (/dev/ttyACM0)
 ```
 
 ## Testing

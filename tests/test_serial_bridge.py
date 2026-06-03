@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,24 @@ class SerialBridgeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.mqtt.topic_base, 'testbench/mark-pantry')
         self.assertEqual(cfg.usb_match, (('1a86', '7523'), ('0403', '*')))
 
+    def test_load_config_reads_serial_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / 'bridge.toml'
+            path.write_text(
+                '[mqtt]\n'
+                'topic_base = "testbench/mark-pantry"\n'
+                '\n'
+                '[serial_aliases]\n'
+                '"platform-ci_hdrc.1-usb-0:1.4.3.2:1.0" = "/dev/ttyACM0"\n',
+                encoding='utf-8',
+            )
+            cfg = load_config(path)
+
+        self.assertEqual(
+            cfg.serial_aliases,
+            {'platform-ci_hdrc.1-usb-0:1.4.3.2:1.0': '/dev/ttyACM0'},
+        )
+
     def test_load_config_with_fallback_prefers_first_existing_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             first = Path(temp_dir) / 'first.toml'
@@ -129,6 +148,62 @@ class SerialBridgeMQTTTests(unittest.TestCase):
         callback(callback_client, None, {}, _EqZeroNoInt(), None)
 
         callback_client.subscribe.assert_called_once_with('testbench/mark-desktop/+/device_serial_input')
+
+    def test_port_alias_prefers_config_then_alias_file_then_real_path(self) -> None:
+        port = 'platform-ci_hdrc.1-usb-0:1.4.3.2:1.0'
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            serial_base = Path(temp_dir)
+            alias_file = serial_base / f'{port}.alias'
+            alias_file.write_text('/dev/ttyACM0\n', encoding='utf-8')
+
+            cfg = SerialBridgeConfig(
+                mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+                usb_match=None,
+            )
+            bridge = SerialBridge(cfg, serial_base_path=serial_base)
+            self.assertEqual(bridge.port_alias(port, '/dev/ttyUSB9'), '/dev/ttyACM0')
+
+            override_cfg = SerialBridgeConfig(
+                mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+                usb_match=None,
+                serial_aliases={port: 'console'},
+            )
+            override_bridge = SerialBridge(override_cfg, serial_base_path=serial_base)
+            self.assertEqual(override_bridge.port_alias(port, '/dev/ttyUSB9'), 'console')
+
+            alias_file.unlink()
+            self.assertEqual(bridge.port_alias(port, '/dev/ttyUSB9'), '/dev/ttyUSB9')
+
+    def test_list_candidate_ports_ignores_alias_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            serial_base = Path(temp_dir)
+            (serial_base / 'platform-ci_hdrc.1-usb-0:1.4.3.2:1.0').touch()
+            (serial_base / 'platform-ci_hdrc.1-usb-0:1.4.3.2:1.0.alias').touch()
+
+            cfg = SerialBridgeConfig(
+                mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+                usb_match=None,
+            )
+            bridge = SerialBridge(cfg, serial_base_path=serial_base)
+
+            self.assertEqual(bridge._list_candidate_ports(), {'platform-ci_hdrc.1-usb-0:1.4.3.2:1.0'})
+
+    def test_publish_port_availability_is_retained_json(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+            usb_match=None,
+        )
+        bridge = SerialBridge(cfg)
+        bridge.mqtt_client = MagicMock()
+
+        bridge.publish_port_availability('port-a', '/dev/ttyACM0')
+
+        bridge.mqtt_client.publish.assert_called_once()
+        topic, payload = bridge.mqtt_client.publish.call_args.args
+        self.assertEqual(topic, 'testbench/mark-desktop/port-a/_mqtty/available')
+        self.assertEqual(json.loads(payload), {'port': 'port-a', 'alias': '/dev/ttyACM0'})
+        self.assertTrue(bridge.mqtt_client.publish.call_args.kwargs['retain'])
 
 
 if __name__ == '__main__':

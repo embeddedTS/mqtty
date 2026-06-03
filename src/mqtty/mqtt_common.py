@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlparse
 
 from paho.mqtt.client import Client
@@ -9,6 +9,8 @@ from paho.mqtt.enums import CallbackAPIVersion
 
 MQTTScheme = Literal["mqtt", "ws", "wss"]
 MQTTTransport = Literal["tcp", "websockets"]
+DISCOVERY_META_TOPIC = "_mqtty"
+DISCOVERY_AVAILABLE_TOPIC = "available"
 
 DEFAULT_PORTS: dict[MQTTScheme, int] = {
     "mqtt": 1883,
@@ -35,7 +37,7 @@ class MQTTConnectionInfo:
         if host is None:
             raise ValueError("MQTT URI must include a hostname.")
 
-        scheme = uri.scheme
+        scheme = cast(MQTTScheme, uri.scheme)
         transport: MQTTTransport = "websockets" if scheme in {"ws", "wss"} else "tcp"
         return cls(
             scheme=scheme,
@@ -52,6 +54,45 @@ class MQTTConnectionInfo:
         if not normalized_suffix:
             return self.base_path
         return f"{self.base_path}/{normalized_suffix}"
+
+
+def split_topic_path(topic: str) -> tuple[str, ...]:
+    return tuple(part for part in topic.split("/") if part)
+
+
+def join_topic_path(*parts: str) -> str:
+    normalized_parts = [part.strip("/") for part in parts if part.strip("/")]
+    return "/".join(normalized_parts)
+
+
+def availability_topic(topic_base: str, port: str) -> str:
+    return join_topic_path(topic_base, port, DISCOVERY_META_TOPIC, DISCOVERY_AVAILABLE_TOPIC)
+
+
+def availability_subscribe_topic(topic_base: str) -> str:
+    return join_topic_path(topic_base, "#")
+
+
+def extract_available_path(topic: str, topic_base: str) -> str | None:
+    topic_parts = split_topic_path(topic)
+    base_parts = split_topic_path(topic_base)
+
+    if len(topic_parts) < len(base_parts) + 3:
+        return None
+    if topic_parts[: len(base_parts)] != base_parts:
+        return None
+    if topic_parts[-2:] != (DISCOVERY_META_TOPIC, DISCOVERY_AVAILABLE_TOPIC):
+        return None
+
+    return join_topic_path(*topic_parts[len(base_parts) : -2])
+
+
+def extract_available_port_name(topic: str, topic_base: str) -> str | None:
+    available_path = extract_available_path(topic, topic_base)
+    if available_path is None:
+        return None
+
+    return split_topic_path(available_path)[-1]
 
 
 def create_client(connection: MQTTConnectionInfo) -> Client:

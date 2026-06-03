@@ -18,3 +18,8 @@ topic_base = "testbench/serial"
 # [[usb_match]]
 # vid = "*"
 # pid = "*"
+
+## Optional serial aliases. These override <serial-base-path>/<port>.alias files
+## and the default alias of the resolved local device path, such as /dev/ttyACM0.
+#[serial_aliases]
+#"platform-ci_hdrc.1-usb-0:1.4.3.2:1.0" = "console"

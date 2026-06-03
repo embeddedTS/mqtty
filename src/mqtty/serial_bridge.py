@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import select
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -15,10 +16,16 @@ from paho.mqtt.enums import CallbackAPIVersion
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
 
+from mqtty.mqtt_common import (
+    availability_topic,
+    join_topic_path as join_topic_path,
+    split_topic_path as split_topic_path,
+)
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - python <3.11
-    import tomli as tomllib  # type: ignore[import-not-found]
+    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 DEFAULT_CONFIG_PATHS = [
     Path('/etc/mqtty-serial-bridge.toml'),
@@ -26,6 +33,7 @@ DEFAULT_CONFIG_PATHS = [
 DEFAULT_SERIAL_BASE_PATH = Path('/dev/serial/by-path')
 DEFAULT_BAUD_RATE = 115200
 DEFAULT_SCAN_INTERVAL_S = 1.0
+PORT_ALIAS_SUFFIX = '.alias'
 
 DEVICE_SERIAL_INPUT_TOPIC = 'device_serial_input'
 DEVICE_SERIAL_OUTPUT_TOPIC = 'device_serial_output'
@@ -44,6 +52,7 @@ class MQTTBridgeConfig:
 class SerialBridgeConfig:
     mqtt: MQTTBridgeConfig
     usb_match: tuple[tuple[str, str], ...] | None
+    serial_aliases: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -52,15 +61,7 @@ class SerialPortState:
     thread: threading.Thread
     serial_output_topic: str
     real_device_path: str
-
-
-def split_topic_path(topic: str) -> tuple[str, ...]:
-    return tuple(part for part in topic.split('/') if part)
-
-
-def join_topic_path(*parts: str) -> str:
-    normalized_parts = [part.strip('/') for part in parts if part.strip('/')]
-    return '/'.join(normalized_parts)
+    alias: str
 
 
 def extract_port_name(topic: str, topic_base: str) -> str | None:
@@ -102,7 +103,9 @@ def load_config(path: Path) -> SerialBridgeConfig:
             allow_list.append((vid, pid))
         usb_match = tuple(allow_list)
 
-    return SerialBridgeConfig(mqtt=mqtt_cfg, usb_match=usb_match)
+    serial_aliases = {str(port): str(alias) for port, alias in raw.get('serial_aliases', {}).items()}
+
+    return SerialBridgeConfig(mqtt=mqtt_cfg, usb_match=usb_match, serial_aliases=serial_aliases)
 
 
 def load_config_with_fallback(path: Path | None) -> tuple[SerialBridgeConfig, Path]:
@@ -267,10 +270,47 @@ class SerialBridge:
     def _list_candidate_ports(self) -> set[str]:
         ports: set[str] = set()
         for item in os.listdir(self.serial_base_path):
+            if item.endswith(PORT_ALIAS_SUFFIX):
+                continue
             if 'usb' in item and 'usbv2' in item:
                 continue
             ports.add(item)
         return ports
+
+    def _alias_file_path(self, port: str) -> Path:
+        return self.serial_base_path / f'{port}{PORT_ALIAS_SUFFIX}'
+
+    def _read_port_alias_file(self, port: str) -> str | None:
+        alias_path = self._alias_file_path(port)
+        if not alias_path.exists():
+            return None
+
+        try:
+            alias = alias_path.read_text(encoding='utf-8').strip()
+        except OSError as exc:
+            logger.warning('Failed to read alias file %s: %s', alias_path, exc)
+            return None
+
+        return alias or None
+
+    def port_alias(self, port: str, real_dev_path: str) -> str:
+        config_alias = self.cfg.serial_aliases.get(port)
+        if config_alias:
+            return config_alias
+
+        file_alias = self._read_port_alias_file(port)
+        if file_alias:
+            return file_alias
+
+        return real_dev_path
+
+    def publish_port_availability(self, port: str, alias: str) -> None:
+        payload = json.dumps({'port': port, 'alias': alias}, separators=(',', ':'))
+        self.mqtt_client.publish(
+            availability_topic(self.cfg.mqtt.topic_base, port),
+            payload,
+            retain=True,
+        )
 
     def _handle_new_port(self, port: str) -> None:
         full_path = self.serial_base_path / port
@@ -304,11 +344,13 @@ class SerialBridge:
 
     def start_serial_thread(self, port: str, real_dev_path: str | None = None) -> None:
         try:
-            import serial
+            import serial  # type: ignore[import-untyped]
 
             full_path = self.serial_base_path / port
             serial_conn = serial.Serial(str(full_path), self.baud_rate, timeout=0)
             serial_output_topic = join_topic_path(self.cfg.mqtt.topic_base, port, DEVICE_SERIAL_OUTPUT_TOPIC)
+            resolved_real_dev_path = real_dev_path or os.path.realpath(full_path)
+            alias = self.port_alias(port, resolved_real_dev_path)
             thread = threading.Thread(
                 target=self.handle_serial,
                 args=(port, serial_conn, serial_output_topic),
@@ -319,11 +361,13 @@ class SerialBridge:
                 connection=serial_conn,
                 thread=thread,
                 serial_output_topic=serial_output_topic,
-                real_device_path=real_dev_path or os.path.realpath(full_path),
+                real_device_path=resolved_real_dev_path,
+                alias=alias,
             )
             with self._state_lock:
                 self.serial_ports[port] = state
             thread.start()
+            self.publish_port_availability(port, alias)
         except Exception as exc:
             logger.error('Failed to open %s: %s', port, exc)
             if real_dev_path:
