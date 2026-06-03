@@ -62,5 +62,6 @@ def create_client(connection: MQTTConnectionInfo) -> Client:
 
 
 def connect_and_loop_forever(client: Client, connection: MQTTConnectionInfo) -> None:
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect_async(connection.host, connection.port)
-    client.loop_forever()
+    client.loop_forever(retry_first_connection=True)
