@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import signal
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from mqtty.serial_bridge import (
     DEVICE_SERIAL_INPUT_TOPIC,
@@ -13,6 +14,7 @@ from mqtty.serial_bridge import (
     SerialBridgeConfig,
     SerialPortState,
     extract_port_name,
+    install_signal_handlers,
     join_topic_path,
     load_config,
     load_config_with_fallback,
@@ -252,6 +254,29 @@ class SerialBridgeMQTTTests(unittest.TestCase):
             b'',
             retain=True,
         )
+
+    def test_install_signal_handlers_sets_stop_event(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+            usb_match=None,
+        )
+        bridge = SerialBridge(cfg)
+        handlers: dict[int, object] = {}
+
+        def capture_handler(signum: int, handler: object) -> None:
+            handlers[signum] = handler
+
+        with patch('mqtty.serial_bridge.signal.signal', side_effect=capture_handler):
+            install_signal_handlers(bridge)
+
+        self.assertIn(signal.SIGINT, handlers)
+        self.assertIn(signal.SIGTERM, handlers)
+        handler = handlers[signal.SIGTERM]
+        assert callable(handler)
+
+        handler(signal.SIGTERM, None)
+
+        self.assertTrue(bridge.stop_event.is_set())
 
 
 if __name__ == '__main__':

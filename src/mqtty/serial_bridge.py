@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import select
+import signal
 import threading
 import time
 from dataclasses import dataclass, field
@@ -456,6 +457,14 @@ class SerialBridge:
             self.stop()
 
 
+def install_signal_handlers(bridge: SerialBridge) -> None:
+    def handle_signal(_signum: int, _frame: object) -> None:
+        bridge.stop_event.set()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Bridge local UART devices to MQTT topics.')
     parser.add_argument(
@@ -502,6 +511,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         baud_rate=args.baud_rate,
         scan_interval_s=args.scan_interval,
     )
+    install_signal_handlers(bridge)
     bridge.run()
     return 0
 
