@@ -110,11 +110,12 @@ For repeated use, set `MQTTY_URI` to your usual broker and base topic:
 ```bash
 export MQTTY_URI=mqtt://broker.local/testbench/mark-desktop
 mqtty --list
+mqtty usb-c
 mqtty platform-ci_hdrc.1-usb-0:1.2:1.0
 mqtty --pts-only platform-ci_hdrc.1-usb-0:1.2:1.0
 ```
 
-Short paths are appended to `MQTTY_URI`; full `mqtt://`, `ws://`, and `wss://` URLs are still accepted anywhere a URI is accepted.
+Short paths are appended to `MQTTY_URI`; full `mqtt://`, `ws://`, and `wss://` URLs are still accepted anywhere a URI is accepted. Bare names, such as `usb-c`, are resolved against discovered port names and aliases before connecting. If a bare name is not listed by discovery, `mqtty` exits before opening the MQTT session.
 
 To capture a replay log while a device is running:
 

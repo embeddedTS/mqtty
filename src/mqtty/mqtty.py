@@ -33,6 +33,7 @@ PICOCOM_ESCAPE = 0x01
 PICOCOM_EXIT = 0x18
 MQTTY_URI_ENV = "MQTTY_URI"
 MQTT_URI_SCHEMES = ("mqtt://", "ws://", "wss://")
+CONNECTION_NOTICE = "< mqtty connection established >\r\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,7 @@ class MQTTY:
         self.connected_event = threading.Event()
         self.stop_event = threading.Event()
         self.escape_pending = False
+        self.connection_notice_printed = False
 
     def on_message(self, _client: Client, _userdata: object, msg: MQTTMessage) -> None:
         try:
@@ -106,6 +108,9 @@ class MQTTY:
             if reason_code == 0:
                 self.connected = True
                 self.connected_event.set()
+                if not self.connection_notice_printed:
+                    sys.stderr.write(CONNECTION_NOTICE)
+                    self.connection_notice_printed = True
                 client.subscribe(self.device_serial_output_topic)
             else:
                 sys.stderr.write(f"Failed to connect to MQTT broker, return code {reason_code}\n")
@@ -310,15 +315,44 @@ def discovered_port_uri(base_uri: str, port: str) -> str:
     return f"{base_uri.rstrip('/')}/{port}"
 
 
-def resolve_mqtt_uri(mqtt_uri: str | None, default_uri: str | None = None) -> str | None:
+def is_full_mqtt_uri(mqtt_uri: str) -> bool:
+    return mqtt_uri.startswith(MQTT_URI_SCHEMES)
+
+
+def is_bare_serial_name(mqtt_uri: str) -> bool:
+    return "/" not in mqtt_uri and ":" not in mqtt_uri
+
+
+def matching_available_ports(query: str, available_ports: list[AvailableSerialPort]) -> list[AvailableSerialPort]:
+    return [available_port for available_port in available_ports if query in {available_port.port, available_port.alias}]
+
+
+def resolve_mqtt_uri(
+    mqtt_uri: str | None,
+    default_uri: str | None = None,
+    available_ports: list[AvailableSerialPort] | None = None,
+) -> str | None:
     if mqtt_uri is None:
         return default_uri
 
-    if mqtt_uri.startswith(MQTT_URI_SCHEMES):
+    if is_full_mqtt_uri(mqtt_uri):
         return mqtt_uri
 
     if default_uri is None:
         return None
+
+    if available_ports is not None:
+        matches = matching_available_ports(mqtt_uri, available_ports)
+        if len(matches) == 1:
+            return discovered_port_uri(default_uri, matches[0].port)
+        if len(matches) > 1:
+            matched_ports = ", ".join(available_port.port for available_port in matches)
+            raise ValueError(f"Ambiguous serial port or alias {mqtt_uri!r}. Matches: {matched_ports}")
+        if is_bare_serial_name(mqtt_uri):
+            raise ValueError(
+                f"Unknown serial port or alias {mqtt_uri!r} under {default_uri}. "
+                "Use 'mqtty -l' to list available ports, or pass a full MQTT URI."
+            )
 
     return discovered_port_uri(default_uri, mqtt_uri)
 
@@ -353,12 +387,16 @@ def main(argv: list[str] | None = None) -> None:
     if args.list and args.pts_only:
         parser.error("--list cannot be combined with --pts-only")
 
-    default_uri = os.environ.get(MQTTY_URI_ENV)
-    mqtt_uri = resolve_mqtt_uri(args.mqtt_uri, default_uri)
-    if mqtt_uri is None:
-        parser.error(f"mqtt_uri is required unless {MQTTY_URI_ENV} is set")
-
     try:
+        default_uri = os.environ.get(MQTTY_URI_ENV)
+        available_ports: list[AvailableSerialPort] | None = None
+        if not args.list and args.mqtt_uri is not None and not is_full_mqtt_uri(args.mqtt_uri) and default_uri is not None:
+            available_ports = list_available_serial_ports(default_uri, args.list_timeout)
+
+        mqtt_uri = resolve_mqtt_uri(args.mqtt_uri, default_uri, available_ports)
+        if mqtt_uri is None:
+            parser.error(f"mqtt_uri is required unless {MQTTY_URI_ENV} is set")
+
         if args.list:
             for available_port in list_available_serial_ports(mqtt_uri, args.list_timeout):
                 print(f"{discovered_port_uri(mqtt_uri, available_port.port)} ({available_port.alias})")

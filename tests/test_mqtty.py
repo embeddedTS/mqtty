@@ -3,10 +3,13 @@ from __future__ import annotations
 import io
 import os
 import unittest
-from unittest.mock import patch
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 from mqtty.mqtty import (
     AvailableSerialPort,
+    CONNECTION_NOTICE,
+    MQTTY,
     available_port_from_message,
     discovered_port_uri,
     main,
@@ -75,6 +78,49 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             'mqtt://broker.local/testbench/mark-desktop/port-a',
         )
 
+    def test_resolve_mqtt_uri_expands_discovered_alias_against_default(self) -> None:
+        ports = [AvailableSerialPort('pci-0000:12:00.3-usb-0:1.1.1.3:1.0', 'usb-c')]
+
+        self.assertEqual(
+            resolve_mqtt_uri('usb-c', 'mqtt://broker.local/testbench/mark-desktop', ports),
+            'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
+        )
+
+    def test_resolve_mqtt_uri_expands_discovered_port_against_default(self) -> None:
+        ports = [AvailableSerialPort('port-a', 'usb-a')]
+
+        self.assertEqual(
+            resolve_mqtt_uri('port-a', 'mqtt://broker.local/testbench/mark-desktop', ports),
+            'mqtt://broker.local/testbench/mark-desktop/port-a',
+        )
+
+    def test_resolve_mqtt_uri_rejects_unknown_bare_name_when_ports_are_known(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown serial port or alias 'foobar'"):
+            resolve_mqtt_uri(
+                'foobar',
+                'mqtt://broker.local/testbench/mark-desktop',
+                [AvailableSerialPort('port-a', 'usb-a')],
+            )
+
+    def test_resolve_mqtt_uri_allows_path_like_relative_topic_without_discovery_match(self) -> None:
+        self.assertEqual(
+            resolve_mqtt_uri(
+                'nested/port-a',
+                'mqtt://broker.local/testbench',
+                [AvailableSerialPort('other-port', 'usb-a')],
+            ),
+            'mqtt://broker.local/testbench/nested/port-a',
+        )
+
+    def test_resolve_mqtt_uri_rejects_ambiguous_alias(self) -> None:
+        ports = [
+            AvailableSerialPort('port-a', 'console'),
+            AvailableSerialPort('port-b', 'console'),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Ambiguous serial port or alias 'console'"):
+            resolve_mqtt_uri('console', 'mqtt://broker.local/testbench', ports)
+
     def test_resolve_mqtt_uri_returns_none_without_uri_or_default(self) -> None:
         self.assertIsNone(resolve_mqtt_uri(None, None))
 
@@ -108,6 +154,61 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             main(['-l', 'mqtt://other.local/testbench/other-host'])
 
         list_ports.assert_called_once_with('mqtt://other.local/testbench/other-host', 1.0)
+
+    def test_main_resolves_alias_before_connecting(self) -> None:
+        ports = [AvailableSerialPort('pci-0000:12:00.3-usb-0:1.1.1.3:1.0', 'usb-c')]
+        bridge = MagicMock()
+        bridge.slave_name = None
+        mqtty_cls = MagicMock(return_value=bridge)
+        with (
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
+            patch('mqtty.mqtty.MQTTY', mqtty_cls),
+            patch('mqtty.mqtty.install_signal_handlers'),
+        ):
+            main(['usb-c'])
+
+        list_ports.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop', 1.0)
+        mqtty_cls.assert_called_once_with(
+            'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
+            False,
+        )
+        bridge.start_threads.assert_called_once_with()
+        bridge.stdio_to_mqtt.assert_called_once_with()
+
+    def test_main_rejects_unknown_bare_alias_before_connecting(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=[]),
+            patch('mqtty.mqtty.MQTTY') as mqtty_cls,
+            patch('mqtty.mqtty.sys.stderr', stderr),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main(['foobar'])
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("Unknown serial port or alias 'foobar'", stderr.getvalue())
+        mqtty_cls.assert_not_called()
+
+    def test_mqtt_connect_prints_initial_connection_notice_to_stderr(self) -> None:
+        bridge = MQTTY('mqtt://broker.local/testbench/port-a', use_pty=False)
+        stderr = io.StringIO()
+
+        def connect_once(client: object, _connection: object) -> None:
+            del client
+            on_connect = cast(Any, bridge.mqtt_client.on_connect)
+            assert on_connect is not None
+            on_connect(bridge.mqtt_client, None, {}, 0, None)
+
+        with (
+            patch('mqtty.mqtty.connect_and_loop_forever', side_effect=connect_once),
+            patch('mqtty.mqtty.sys.stderr', stderr),
+        ):
+            bridge.mqtt_connect()
+
+        self.assertEqual(stderr.getvalue(), CONNECTION_NOTICE)
+        self.assertTrue(bridge.connection_notice_printed)
 
 
 if __name__ == '__main__':
