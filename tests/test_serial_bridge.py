@@ -11,6 +11,7 @@ from mqtty.serial_bridge import (
     MQTTBridgeConfig,
     SerialBridge,
     SerialBridgeConfig,
+    SerialPortState,
     extract_port_name,
     join_topic_path,
     load_config,
@@ -204,6 +205,53 @@ class SerialBridgeMQTTTests(unittest.TestCase):
         self.assertEqual(topic, 'testbench/mark-desktop/port-a/_mqtty/available')
         self.assertEqual(json.loads(payload), {'port': 'port-a', 'alias': '/dev/ttyACM0'})
         self.assertTrue(bridge.mqtt_client.publish.call_args.kwargs['retain'])
+
+    def test_clear_port_availability_clears_retained_topic(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+            usb_match=None,
+        )
+        bridge = SerialBridge(cfg)
+        bridge.mqtt_client = MagicMock()
+
+        bridge.clear_port_availability('port-a')
+
+        bridge.mqtt_client.publish.assert_called_once_with(
+            'testbench/mark-desktop/port-a/_mqtty/available',
+            b'',
+            retain=True,
+        )
+
+    def test_stop_serial_thread_clears_retained_availability(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+            usb_match=None,
+        )
+        bridge = SerialBridge(cfg)
+        bridge.mqtt_client = MagicMock()
+        connection = MagicMock()
+        thread = MagicMock()
+        state = SerialPortState(
+            connection=connection,
+            thread=thread,
+            serial_output_topic='testbench/mark-desktop/port-a/device_serial_output',
+            real_device_path='/dev/ttyACM0',
+            alias='/dev/ttyACM0',
+        )
+        bridge.serial_ports['port-a'] = state
+        bridge.opened_real_devices.add('/dev/ttyACM0')
+
+        bridge.stop_serial_thread('port-a')
+
+        thread.join.assert_called_once_with(timeout=2.0)
+        connection.close.assert_called_once_with()
+        self.assertNotIn('port-a', bridge.serial_ports)
+        self.assertNotIn('/dev/ttyACM0', bridge.opened_real_devices)
+        bridge.mqtt_client.publish.assert_called_once_with(
+            'testbench/mark-desktop/port-a/_mqtty/available',
+            b'',
+            retain=True,
+        )
 
 
 if __name__ == '__main__':

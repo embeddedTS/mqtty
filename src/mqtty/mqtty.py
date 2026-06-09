@@ -31,6 +31,8 @@ from mqtty.mqtt_common import (
 
 PICOCOM_ESCAPE = 0x01
 PICOCOM_EXIT = 0x18
+MQTTY_URI_ENV = "MQTTY_URI"
+MQTT_URI_SCHEMES = ("mqtt://", "ws://", "wss://")
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,9 +310,26 @@ def discovered_port_uri(base_uri: str, port: str) -> str:
     return f"{base_uri.rstrip('/')}/{port}"
 
 
+def resolve_mqtt_uri(mqtt_uri: str | None, default_uri: str | None = None) -> str | None:
+    if mqtt_uri is None:
+        return default_uri
+
+    if mqtt_uri.startswith(MQTT_URI_SCHEMES):
+        return mqtt_uri
+
+    if default_uri is None:
+        return None
+
+    return discovered_port_uri(default_uri, mqtt_uri)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="MQTTY: Bridge MQTT to a local terminal or PTY.")
-    parser.add_argument("mqtt_uri", help="MQTT URI (e.g., mqtt://broker/topic)")
+    parser.add_argument(
+        "mqtt_uri",
+        nargs="?",
+        help=f"MQTT URI or path relative to ${MQTTY_URI_ENV} (e.g., mqtt://broker/topic or port-a)",
+    )
     parser.add_argument(
         "-l",
         "--list",
@@ -334,13 +353,18 @@ def main(argv: list[str] | None = None) -> None:
     if args.list and args.pts_only:
         parser.error("--list cannot be combined with --pts-only")
 
+    default_uri = os.environ.get(MQTTY_URI_ENV)
+    mqtt_uri = resolve_mqtt_uri(args.mqtt_uri, default_uri)
+    if mqtt_uri is None:
+        parser.error(f"mqtt_uri is required unless {MQTTY_URI_ENV} is set")
+
     try:
         if args.list:
-            for available_port in list_available_serial_ports(args.mqtt_uri, args.list_timeout):
-                print(f"{discovered_port_uri(args.mqtt_uri, available_port.port)} ({available_port.alias})")
+            for available_port in list_available_serial_ports(mqtt_uri, args.list_timeout):
+                print(f"{discovered_port_uri(mqtt_uri, available_port.port)} ({available_port.alias})")
             return
 
-        bridge = MQTTY(args.mqtt_uri, args.pts_only)
+        bridge = MQTTY(mqtt_uri, args.pts_only)
         install_signal_handlers(bridge)
 
         if args.pts_only and bridge.slave_name is not None:

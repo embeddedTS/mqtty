@@ -312,6 +312,13 @@ class SerialBridge:
             retain=True,
         )
 
+    def clear_port_availability(self, port: str) -> None:
+        self.mqtt_client.publish(
+            availability_topic(self.cfg.mqtt.topic_base, port),
+            b'',
+            retain=True,
+        )
+
     def _handle_new_port(self, port: str) -> None:
         full_path = self.serial_base_path / port
         real_dev_path = os.path.realpath(full_path)
@@ -392,6 +399,8 @@ class SerialBridge:
                 removed_state = self.serial_ports.pop(port, None)
                 if removed_state is not None:
                     self.opened_real_devices.discard(removed_state.real_device_path)
+            if removed_state is not None:
+                self.clear_port_availability(port)
 
     def handle_serial(self, port: str, serial_conn: Any, serial_output_topic: str) -> None:
         try:
@@ -415,6 +424,9 @@ class SerialBridge:
                 state = self.serial_ports.pop(port, None)
                 if state is not None:
                     self.opened_real_devices.discard(state.real_device_path)
+
+            if state is not None:
+                self.clear_port_availability(port)
 
             logger.info('Thread exiting for port: %s', port)
 

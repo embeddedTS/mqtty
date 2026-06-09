@@ -8,7 +8,8 @@ This is useful for debugging, automation, or tunneling serial communication thro
 
 ```bash
 mqtty mqtt://<host>/<topic> [--pts-only]
-mqtty --list mqtt://<host>/<topic-base>
+mqtty <path-below-$MQTTY_URI> [--pts-only]
+mqtty --list [mqtt://<host>/<topic-base>]
 ```
 
 `mqtty` runs in bidirectional terminal mode by default:
@@ -27,7 +28,7 @@ Use `--pts-only` if you only want a PTY device:
 Use `--list` to discover serial ports below a base topic:
 
 * `--list`, `-l`:
-  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print matching serial URLs, and exit.
+  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print matching serial URLs, and exit. If no URI is provided, `MQTTY_URI` is used.
 * `--list-timeout`:
   Seconds to wait for retained discovery messages. Defaults to `1.0`.
 
@@ -71,7 +72,7 @@ The retained availability payload is JSON:
 {"port":"<port>","alias":"<alias>"}
 ```
 
-The MQTT broker stores retained discovery messages, so clients only need to connect to the broker. The bridge does not use a database. Removed ports may remain listed until retained messages are cleared from the broker.
+The MQTT broker stores retained discovery messages, so clients only need to connect to the broker. The bridge does not use a database. The bridge clears a port's retained availability message during normal unplug and shutdown paths. If the bridge process crashes before cleanup, removed ports may remain listed until the bridge restarts or the retained messages are cleared from the broker.
 
 Port aliases are resolved in this order:
 
@@ -104,6 +105,17 @@ mqtty mqtt://broker.local/mydevice --pts-only
 
 This prints the local PTY path and keeps it bridged to the same MQTT topics until interrupted.
 
+For repeated use, set `MQTTY_URI` to your usual broker and base topic:
+
+```bash
+export MQTTY_URI=mqtt://broker.local/testbench/mark-desktop
+mqtty --list
+mqtty platform-ci_hdrc.1-usb-0:1.2:1.0
+mqtty --pts-only platform-ci_hdrc.1-usb-0:1.2:1.0
+```
+
+Short paths are appended to `MQTTY_URI`; full `mqtt://`, `ws://`, and `wss://` URLs are still accepted anywhere a URI is accepted.
+
 To capture a replay log while a device is running:
 
 ```bash
@@ -133,6 +145,8 @@ mqtty-serial-bridge
 To list retained serial bridge ports under a base topic:
 
 ```bash
+export MQTTY_URI=mqtt://broker.local/testbench/serial
+mqtty --list
 mqtty --list mqtt://broker.local/testbench/serial
 mqtty --list mqtt://broker.local/testbench/
 ```
