@@ -198,8 +198,12 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         def connect_once(client: object, _connection: object) -> None:
             del client
             on_connect = cast(Any, bridge.mqtt_client.on_connect)
+            on_subscribe = cast(Any, bridge.mqtt_client.on_subscribe)
             assert on_connect is not None
+            assert on_subscribe is not None
+            bridge.mqtt_client.subscribe = MagicMock(return_value=(0, 1))
             on_connect(bridge.mqtt_client, None, {}, 0, None)
+            on_subscribe(bridge.mqtt_client, None, 1, [0], None)
 
         with (
             patch('mqtty.mqtty.connect_and_loop_forever', side_effect=connect_once),

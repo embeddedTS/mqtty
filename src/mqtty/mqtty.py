@@ -34,6 +34,8 @@ PICOCOM_EXIT = 0x18
 MQTTY_URI_ENV = "MQTTY_URI"
 MQTT_URI_SCHEMES = ("mqtt://", "ws://", "wss://")
 CONNECTION_NOTICE = "< mqtty connection established >\r\n"
+STARTUP_READY = b"R"
+STARTUP_FAILED = b"F"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +83,21 @@ class MQTTY:
         self.stop_event = threading.Event()
         self.escape_pending = False
         self.connection_notice_printed = False
+        self.startup_status_fd: Optional[int] = None
+        self.startup_reported = False
+        self.detached_startup = False
+
+    def report_startup(self, status: bytes) -> None:
+        """Report the detached PTY bridge's startup result to its parent once."""
+        if self.startup_reported:
+            return
+        self.startup_reported = True
+        if self.startup_status_fd is not None:
+            with contextlib.suppress(OSError):
+                os.write(self.startup_status_fd, status)
+            with contextlib.suppress(OSError):
+                os.close(self.startup_status_fd)
+            self.startup_status_fd = None
 
     def on_message(self, _client: Client, _userdata: object, msg: MQTTMessage) -> None:
         try:
@@ -106,14 +123,48 @@ class MQTTY:
         ) -> None:
             del userdata, flags, properties
             if reason_code == 0:
+                result, _mid = client.subscribe(self.device_serial_output_topic)
+                if int(result) != 0:
+                    sys.stderr.write(f"Failed to subscribe to MQTT topic, return code {result}\n")
+                    self.report_startup(STARTUP_FAILED)
+                    if self.detached_startup:
+                        self.stop_event.set()
+                        client.disconnect()
+                elif not self.detached_startup:
+                    self.connected = True
+                    self.connected_event.set()
+                    if not self.connection_notice_printed:
+                        sys.stderr.write(CONNECTION_NOTICE)
+                        self.connection_notice_printed = True
+            else:
+                sys.stderr.write(f"Failed to connect to MQTT broker, return code {reason_code}\n")
+                self.report_startup(STARTUP_FAILED)
+                if self.detached_startup:
+                    self.stop_event.set()
+                    client.disconnect()
+
+        def on_subscribe(
+            client: Client,
+            _userdata: object,
+            _mid: int,
+            reason_codes: list[ReasonCode],
+            _properties: Optional[Properties],
+        ) -> None:
+            if any(reason_code >= 128 for reason_code in reason_codes):
+                sys.stderr.write("Failed to subscribe to MQTT topic\n")
+                self.report_startup(STARTUP_FAILED)
+                if self.detached_startup:
+                    self.stop_event.set()
+                    client.disconnect()
+                return
+
+            if self.detached_startup:
                 self.connected = True
                 self.connected_event.set()
                 if not self.connection_notice_printed:
                     sys.stderr.write(CONNECTION_NOTICE)
                     self.connection_notice_printed = True
-                client.subscribe(self.device_serial_output_topic)
-            else:
-                sys.stderr.write(f"Failed to connect to MQTT broker, return code {reason_code}\n")
+                self.report_startup(STARTUP_READY)
 
         def on_disconnect(
             client: Client,
@@ -127,6 +178,7 @@ class MQTTY:
             self.connected_event.clear()
 
         self.mqtt_client.on_connect = on_connect
+        self.mqtt_client.on_subscribe = on_subscribe
         self.mqtt_client.on_disconnect = on_disconnect
 
         try:
@@ -134,6 +186,7 @@ class MQTTY:
         except Exception as e:
             sys.stderr.write(f"MQTT connection failed: {e}\n")
         finally:
+            self.report_startup(STARTUP_FAILED)
             self.connected = False
             self.connected_event.clear()
             self.stop_event.set()
@@ -251,6 +304,55 @@ def install_signal_handlers(bridge: MQTTY) -> None:
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
+
+
+def run_detached_pty_bridge(bridge: MQTTY) -> int:
+    """Fork a PTY bridge and wait for its MQTT subscription to be ready."""
+    status_read_fd, status_write_fd = os.pipe()
+    try:
+        child_pid = os.fork()
+    except OSError:
+        os.close(status_read_fd)
+        os.close(status_write_fd)
+        raise
+
+    if child_pid == 0:
+        os.close(status_read_fd)
+        bridge.startup_status_fd = status_write_fd
+        bridge.detached_startup = True
+        try:
+            null_fd = os.open(os.devnull, os.O_RDWR)
+            os.dup2(null_fd, sys.stdin.fileno())
+            os.dup2(null_fd, sys.stdout.fileno())
+            if null_fd > 2:
+                os.close(null_fd)
+
+            install_signal_handlers(bridge)
+            bridge.start_threads()
+            while not bridge.stop_event.wait(timeout=1):
+                pass
+        except BaseException as e:
+            bridge.report_startup(STARTUP_FAILED)
+            if not isinstance(e, (KeyboardInterrupt, SystemExit)):
+                sys.stderr.write(f"MQTTY PTY bridge failed: {e}\n")
+        finally:
+            bridge.shutdown()
+        os._exit(0)
+
+    os.close(status_write_fd)
+    try:
+        status = os.read(status_read_fd, 1)
+    finally:
+        os.close(status_read_fd)
+
+    if status != STARTUP_READY:
+        bridge.shutdown()
+        raise RuntimeError("MQTTY PTY bridge failed to connect and subscribe")
+
+    # The child keeps the PTY descriptors; the parent must release them before
+    # returning so command substitution can receive EOF from stdout.
+    bridge.shutdown()
+    return child_pid
 
 
 def available_port_from_message(topic: str, payload: bytes, topic_base: str) -> AvailableSerialPort | None:
@@ -402,20 +504,19 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"{discovered_port_uri(mqtt_uri, available_port.port)} ({available_port.alias})")
             return
 
-        bridge = MQTTY(mqtt_uri, args.pts_only)
-        install_signal_handlers(bridge)
-
-        if args.pts_only and bridge.slave_name is not None:
-            print(bridge.slave_name, flush=True)
-
-        bridge.start_threads()
-
         if args.pts_only:
-            while not bridge.stop_event.wait(timeout=1):
-                pass
+            bridge = MQTTY(mqtt_uri, True)
+            if bridge.slave_name is None:
+                raise RuntimeError("Failed to create PTY device")
+            child_pid = run_detached_pty_bridge(bridge)
+            print(f"MQTTY_PTS={bridge.slave_name}")
+            print(f"MQTTY_PID={child_pid}", flush=True)
         else:
+            bridge = MQTTY(mqtt_uri, False)
+            install_signal_handlers(bridge)
+            bridge.start_threads()
             bridge.stdio_to_mqtt()
-    except ValueError as e:
+    except (OSError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         raise SystemExit(1) from e
     finally:

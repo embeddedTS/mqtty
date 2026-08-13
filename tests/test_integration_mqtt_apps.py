@@ -8,6 +8,7 @@ import select
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -218,6 +219,38 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
         inbound = b"mqtt-to-pty"
         publisher.publish(bridge.device_serial_output_topic, inbound)
         self.assertEqual(read_exact(slave_fd, len(inbound), timeout_s=5.0), inbound)
+
+    def test_mqtty_pts_only_detaches_after_bridge_is_ready(self) -> None:
+        mqtt_uri = self.mqtt_uri("itest/mqtty/detached-device")
+        process = subprocess.Popen(
+            [sys.executable, "-m", "mqtty.mqtty", mqtt_uri, "--pts-only"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        stdout, _ = process.communicate(timeout=5.0)
+        self.assertEqual(process.returncode, 0)
+
+        assignments = stdout.splitlines()
+        self.assertEqual(len(assignments), 2)
+        self.assertTrue(assignments[0].startswith("MQTTY_PTS=/dev/pts/"))
+        self.assertTrue(assignments[1].startswith("MQTTY_PID="))
+        slave_name = assignments[0].split("=", 1)[1]
+        bridge_pid = int(assignments[1].split("=", 1)[1])
+        self.addCleanup(lambda: os.kill(bridge_pid, 15))
+
+        slave_fd = os.open(slave_name, os.O_RDWR | os.O_NOCTTY)
+        self.addCleanup(lambda: os.close(slave_fd))
+        subscriber = MQTTTestClient("127.0.0.1", self.broker.port)
+        self.addCleanup(subscriber.close)
+        subscriber.subscribe("itest/mqtty/detached-device/device_serial_input")
+
+        outbound = b"detached-pty-to-mqtt"
+        os.write(slave_fd, outbound)
+        self.assertEqual(
+            subscriber.wait_for_message("itest/mqtty/detached-device/device_serial_input"),
+            outbound,
+        )
 
     def test_serial_bridge_round_trip_with_fake_serial_symlink(self) -> None:
         cfg = SerialBridgeConfig(
