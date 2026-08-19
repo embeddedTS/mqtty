@@ -13,8 +13,9 @@ authors = [
 dependencies = [
     "paho-mqtt",
     "pyserial",
+    "tomli>=2.4.1",
     "tomli; python_version < '3.11'",
-    "zstandard"
+    "zstandard",
 ]
 
 dynamic = ["version"]
