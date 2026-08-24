@@ -11,10 +11,10 @@ authors = [
     {name = "Mark Featherston", email = "mark@embeddedTS.com"}
 ]
 dependencies = [
-    "paho-mqtt",
-    "pyserial",
-    "tomli; python_version < '3.11'",
-    "zstandard"
+    "paho-mqtt>=2.1.0",
+    "pyserial>=3.5",
+    "tomli>=2.4.1; python_version < '3.11'",
+    "zstandard>=0.25.0"
 ]
 
 dynamic = ["version"]
