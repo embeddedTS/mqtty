@@ -1,0 +1,21 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+      - name: Build the test container
+        run: docker build --file Dockerfile.test --tag mqtty-test .
+      - name: Run the test suite
+        run: docker run --rm mqtty-test
