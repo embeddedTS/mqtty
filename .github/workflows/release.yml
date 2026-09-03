@@ -14,10 +14,10 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v8
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v8
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -28,4 +28,4 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v2
+        uses: pypa/gh-action-pypi-publish@release/v1
