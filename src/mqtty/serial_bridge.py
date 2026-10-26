@@ -262,6 +262,11 @@ class SerialBridge:
             except FileNotFoundError as exc:
                 if exc.filename == str(self.serial_base_path):
                     logger.warning('%s not found, retrying in %.1f second', self.serial_base_path, self.scan_interval_s)
+                    # If the directory is absent, every ignored symlink has
+                    # disappeared. Clear the cache so a device that returns
+                    # at the same USB path can be inspected again.
+                    with self._state_lock:
+                        self.ignored_ports.clear()
                 else:
                     logger.error('Unexpected FileNotFoundError: %s', exc)
                 time.sleep(self.scan_interval_s)
