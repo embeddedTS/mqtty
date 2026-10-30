@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE_NAME="${IMAGE_NAME:-mqtty-test:latest}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.13}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
 VERBOSE=0
 ARGS=()
 
