@@ -7,6 +7,7 @@ import os
 import pty
 import select
 import signal
+import socket
 import sys
 import termios
 import threading
@@ -473,6 +474,12 @@ def main(argv: list[str] | None = None) -> None:
         help="List retained mqtty serial ports under the MQTT URI and exit",
     )
     parser.add_argument(
+        "-a",
+        dest="all",
+        action="store_true",
+        help="Include devices advertised by other hostnames when using --list",
+    )
+    parser.add_argument(
         "--list-timeout",
         type=float,
         default=1.0,
@@ -500,7 +507,16 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(f"mqtt_uri is required unless {MQTTY_URI_ENV} is set")
 
         if args.list:
-            for available_port in list_available_serial_ports(mqtt_uri, args.list_timeout):
+            available_ports = list_available_serial_ports(mqtt_uri, args.list_timeout)
+            connection = MQTTConnectionInfo.parse(mqtt_uri)
+            base_parts = connection.base_path.split("/")
+            local_host_is_in_base = bool(base_parts and base_parts[-1] == socket.gethostname())
+            if not args.all and not local_host_is_in_base:
+                local_hostname = socket.gethostname()
+                available_ports = [
+                    port for port in available_ports if port.port.split("/", 1)[0] == local_hostname
+                ]
+            for available_port in available_ports:
                 print(f"{discovered_port_uri(mqtt_uri, available_port.port)} ({available_port.alias})")
             return
 

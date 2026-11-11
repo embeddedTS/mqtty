@@ -28,7 +28,9 @@ Use `--pts-only` if you only want a PTY device:
 Use `--list` to discover serial ports below a base topic:
 
 * `--list`, `-l`:
-  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print matching serial URLs, and exit. If no URI is provided, `MQTTY_URI` is used.
+  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print devices advertised by the local hostname, and exit. If no URI is provided, `MQTTY_URI` is used.
+* `-a` with `--list` (for example, `-la`):
+  Include devices advertised by all hostnames below the topic base.
 * `--list-timeout`:
   Seconds to wait for retained discovery messages. Defaults to `1.0`.
 
