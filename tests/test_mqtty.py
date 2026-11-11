@@ -137,15 +137,15 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         stdout = io.StringIO()
         ports = [AvailableSerialPort('port-a', '/dev/ttyACM0')]
         with (
-            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
-            patch('mqtty.mqtty.socket.gethostname', return_value='mark-desktop'),
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/test-host'}, clear=True),
+            patch('mqtty.mqtty.socket.gethostname', return_value='test-host'),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
             patch('mqtty.mqtty.sys.stdout', stdout),
         ):
             main(['-l'])
 
-        list_ports.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop', 1.0)
-        self.assertEqual(stdout.getvalue(), 'mqtt://broker.local/testbench/mark-desktop/port-a (/dev/ttyACM0)\n')
+        list_ports.assert_called_once_with('mqtt://broker.local/testbench/test-host', 1.0)
+        self.assertEqual(stdout.getvalue(), 'mqtt://broker.local/testbench/test-host/port-a (/dev/ttyACM0)\n')
 
     def test_list_explicit_uri_overrides_mqtty_uri_default(self) -> None:
         with (
