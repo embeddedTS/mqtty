@@ -86,6 +86,14 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
         )
 
+    def test_resolve_mqtt_uri_expands_dev_path_alias_against_default(self) -> None:
+        ports = [AvailableSerialPort('port-a', '/dev/ttyUSB0')]
+
+        self.assertEqual(
+            resolve_mqtt_uri('/dev/ttyUSB0', 'mqtt://broker.local/testbench/mark-desktop', ports),
+            'mqtt://broker.local/testbench/mark-desktop/port-a',
+        )
+
     def test_resolve_mqtt_uri_expands_discovered_port_against_default(self) -> None:
         ports = [AvailableSerialPort('port-a', 'usb-a')]
 
@@ -173,6 +181,24 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
             False,
         )
+        bridge.start_threads.assert_called_once_with()
+        bridge.stdio_to_mqtt.assert_called_once_with()
+
+    def test_main_resolves_dev_path_alias_before_connecting(self) -> None:
+        ports = [AvailableSerialPort('port-a', '/dev/ttyUSB0')]
+        bridge = MagicMock()
+        bridge.slave_name = None
+        mqtty_cls = MagicMock(return_value=bridge)
+        with (
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
+            patch('mqtty.mqtty.MQTTY', mqtty_cls),
+            patch('mqtty.mqtty.install_signal_handlers'),
+        ):
+            main(['/dev/ttyUSB0'])
+
+        list_ports.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop', 1.0)
+        mqtty_cls.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop/port-a', False)
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
 

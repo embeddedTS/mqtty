@@ -422,7 +422,7 @@ def is_full_mqtt_uri(mqtt_uri: str) -> bool:
 
 
 def is_bare_serial_name(mqtt_uri: str) -> bool:
-    return "/" not in mqtt_uri and ":" not in mqtt_uri
+    return mqtt_uri.startswith("/dev/") or ("/" not in mqtt_uri and ":" not in mqtt_uri)
 
 
 def matching_available_ports(query: str, available_ports: list[AvailableSerialPort]) -> list[AvailableSerialPort]:
