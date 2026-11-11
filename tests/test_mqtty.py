@@ -145,14 +145,15 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         stdout = io.StringIO()
         ports = [AvailableSerialPort('port-a', '/dev/ttyACM0')]
         with (
-            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/test-host'}, clear=True),
+            patch('mqtty.mqtty.socket.gethostname', return_value='test-host'),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
             patch('mqtty.mqtty.sys.stdout', stdout),
         ):
             main(['-l'])
 
-        list_ports.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop', 1.0)
-        self.assertEqual(stdout.getvalue(), 'mqtt://broker.local/testbench/mark-desktop/port-a (/dev/ttyACM0)\n')
+        list_ports.assert_called_once_with('mqtt://broker.local/testbench/test-host', 1.0)
+        self.assertEqual(stdout.getvalue(), 'mqtt://broker.local/testbench/test-host/port-a (/dev/ttyACM0)\n')
 
     def test_list_explicit_uri_overrides_mqtty_uri_default(self) -> None:
         with (
@@ -162,6 +163,42 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             main(['-l', 'mqtt://other.local/testbench/other-host'])
 
         list_ports.assert_called_once_with('mqtt://other.local/testbench/other-host', 1.0)
+
+    def test_list_filters_to_local_hostname_by_default(self) -> None:
+        stdout = io.StringIO()
+        ports = [
+            AvailableSerialPort('workstation-a/port-a', '/dev/ttyACM0'),
+            AvailableSerialPort('workstation-b/port-b', '/dev/ttyUSB0'),
+        ]
+        with (
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
+            patch('mqtty.mqtty.socket.gethostname', return_value='workstation-a'),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports),
+            patch('mqtty.mqtty.sys.stdout', stdout),
+        ):
+            main(['-l'])
+
+        self.assertEqual(stdout.getvalue(), 'mqtt://broker.local/testbench/workstation-a/port-a (/dev/ttyACM0)\n')
+
+    def test_list_all_includes_devices_from_other_hostnames(self) -> None:
+        stdout = io.StringIO()
+        ports = [
+            AvailableSerialPort('workstation-a/port-a', '/dev/ttyACM0'),
+            AvailableSerialPort('workstation-b/port-b', '/dev/ttyUSB0'),
+        ]
+        with (
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
+            patch('mqtty.mqtty.socket.gethostname', return_value='workstation-a'),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports),
+            patch('mqtty.mqtty.sys.stdout', stdout),
+        ):
+            main(['-la'])
+
+        self.assertEqual(
+            stdout.getvalue(),
+            'mqtt://broker.local/testbench/workstation-a/port-a (/dev/ttyACM0)\n'
+            'mqtt://broker.local/testbench/workstation-b/port-b (/dev/ttyUSB0)\n',
+        )
 
     def test_main_resolves_alias_before_connecting(self) -> None:
         ports = [AvailableSerialPort('pci-0000:12:00.3-usb-0:1.1.1.3:1.0', 'usb-c')]
