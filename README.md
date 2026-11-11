@@ -9,8 +9,8 @@ This is useful for debugging, automation, or tunneling serial communication thro
 ```bash
 mqtty mqtt://<host>/<topic> [--pts-only]
 mqtty <path-below-$MQTTY_URI> [--pts-only]
-mqtty /dev/ttyUSB0
-mqtty --list [mqtt://<host>/<topic-base>]
+mqtty [--config /path/to/mqtty-serial-bridge.toml] /dev/ttyUSB0
+mqtty --list [mqtt://<host>/<topic-base>] [--config /path/to/mqtty-serial-bridge.toml]
 ```
 
 `mqtty` runs in bidirectional terminal mode by default:
@@ -21,13 +21,13 @@ mqtty --list [mqtt://<host>/<topic-base>]
 * type `Ctrl-A Ctrl-X` to exit, matching picocom's default exit sequence
 * type `Ctrl-A Ctrl-A` to send a literal `Ctrl-A`
 
-Pass the local device alias, such as `/dev/ttyUSB0`, to resolve it through discovery and connect to its MQTT topic:
+Pass the local device alias, such as `/dev/ttyUSB0`, to resolve it through discovery and connect to its MQTT topic. When `MQTTY_URI` is unset, mqtty reads the broker and topic base from `/etc/mqtty-serial-bridge.toml`, the default config used by `mqtty-serial-bridge`:
 
 ```bash
 mqtty /dev/ttyUSB0
 ```
 
-This requires `MQTTY_URI` to point to the broker and topic base where the device is advertised. It uses the same terminal and MQTT behavior as connecting by the device's topic path or another alias.
+Use `--config` to select a different bridge config file. The configured topic base scopes discovery to that bridge, so local listing includes devices below it without requiring hostname segments in device paths. `MQTTY_URI`, when set, continues to override the config default.
 
 Use `--pts-only` if you only want a PTY device:
 
@@ -37,7 +37,7 @@ Use `--pts-only` if you only want a PTY device:
 Use `--list` to discover serial ports below a base topic:
 
 * `--list`, `-l`:
-  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print devices advertised by the local hostname, and exit. If no URI is provided, `MQTTY_URI` is used.
+  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print local bridge devices, and exit. If no URI is provided, mqtty uses `MQTTY_URI` or the bridge config's broker and topic base. With the bridge config, direct device entries under `topic_base` are local; `-a` includes nested host paths too.
 * `-a` with `--list` (for example, `-la`):
   Include devices advertised by all hostnames below the topic base.
 * `--list-timeout`:

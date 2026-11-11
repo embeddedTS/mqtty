@@ -15,6 +15,7 @@ import time
 import tty
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from paho.mqtt.client import Client, MQTTMessage
@@ -28,7 +29,7 @@ from mqtty.mqtt_common import (
     create_client,
     extract_available_path,
 )
-
+from mqtty.serial_bridge import SerialBridgeConfig, load_config_with_fallback
 
 PICOCOM_ESCAPE = 0x01
 PICOCOM_EXIT = 0x18
@@ -422,6 +423,13 @@ def is_full_mqtt_uri(mqtt_uri: str) -> bool:
     return mqtt_uri.startswith(MQTT_URI_SCHEMES)
 
 
+def mqtt_uri_from_bridge_config(config: SerialBridgeConfig) -> str:
+    host = config.mqtt.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"mqtt://{host}:{config.mqtt.port}/{config.mqtt.topic_base}"
+
+
 def is_bare_serial_name(mqtt_uri: str) -> bool:
     return mqtt_uri.startswith("/dev/") or ("/" not in mqtt_uri and ":" not in mqtt_uri)
 
@@ -486,6 +494,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Seconds to wait for retained discovery messages when using --list",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to mqtty-serial-bridge config (default: /etc/mqtty-serial-bridge.toml)",
+    )
+    parser.add_argument(
         "-p",
         "--pts-only",
         action="store_true",
@@ -498,20 +512,42 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         default_uri = os.environ.get(MQTTY_URI_ENV)
+        default_uri_from_bridge_config = False
+        if default_uri is None and (args.mqtt_uri is None or not is_full_mqtt_uri(args.mqtt_uri)):
+            if args.config is not None:
+                config, _config_path = load_config_with_fallback(args.config)
+                default_uri = mqtt_uri_from_bridge_config(config)
+                default_uri_from_bridge_config = True
+            else:
+                try:
+                    config, _config_path = load_config_with_fallback(None)
+                except FileNotFoundError:
+                    # A missing optional default config is silent; full URIs and
+                    # MQTTY_URI remain usable without a bridge config.
+                    pass
+                else:
+                    default_uri = mqtt_uri_from_bridge_config(config)
+                    default_uri_from_bridge_config = True
+
         available_ports: list[AvailableSerialPort] | None = None
         if not args.list and args.mqtt_uri is not None and not is_full_mqtt_uri(args.mqtt_uri) and default_uri is not None:
             available_ports = list_available_serial_ports(default_uri, args.list_timeout)
+            if default_uri_from_bridge_config:
+                available_ports = [port for port in available_ports if "/" not in port.port]
 
         mqtt_uri = resolve_mqtt_uri(args.mqtt_uri, default_uri, available_ports)
         if mqtt_uri is None:
-            parser.error(f"mqtt_uri is required unless {MQTTY_URI_ENV} is set")
+            parser.error(f"mqtt_uri is required unless {MQTTY_URI_ENV} or a bridge config is available")
 
         if args.list:
             available_ports = list_available_serial_ports(mqtt_uri, args.list_timeout)
             connection = MQTTConnectionInfo.parse(mqtt_uri)
             base_parts = connection.base_path.split("/")
-            local_host_is_in_base = bool(base_parts and base_parts[-1] == socket.gethostname())
-            if not args.all and not local_host_is_in_base:
+            if not args.all and default_uri_from_bridge_config:
+                # The serial bridge publishes its local ports directly under
+                # its configured topic_base; nested paths are other hosts.
+                available_ports = [port for port in available_ports if "/" not in port.port]
+            elif not args.all and not (base_parts and base_parts[-1] == socket.gethostname()):
                 local_hostname = socket.gethostname()
                 available_ports = [
                     port for port in available_ports if port.port.split("/", 1)[0] == local_hostname

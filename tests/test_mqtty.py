@@ -3,18 +3,20 @@ from __future__ import annotations
 import io
 import os
 import unittest
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from mqtty.mqtty import (
-    AvailableSerialPort,
     CONNECTION_NOTICE,
     MQTTY,
+    AvailableSerialPort,
     available_port_from_message,
     discovered_port_uri,
     main,
     resolve_mqtt_uri,
 )
+from mqtty.serial_bridge import MQTTBridgeConfig, SerialBridgeConfig
 
 
 class MQTTYDiscoveryTests(unittest.TestCase):
@@ -134,12 +136,16 @@ class MQTTYDiscoveryTests(unittest.TestCase):
 
     def test_main_errors_without_uri_or_default(self) -> None:
         stderr = io.StringIO()
-        with patch.dict(os.environ, {}, clear=True), patch('mqtty.mqtty.sys.stderr', stderr):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', side_effect=FileNotFoundError('no config')),
+            patch('mqtty.mqtty.sys.stderr', stderr),
+        ):
             with self.assertRaises(SystemExit) as ctx:
                 main(['-l'])
 
         self.assertEqual(ctx.exception.code, 2)
-        self.assertIn('mqtt_uri is required unless MQTTY_URI is set', stderr.getvalue())
+        self.assertIn('mqtt_uri is required unless MQTTY_URI or a bridge config is available', stderr.getvalue())
 
     def test_list_uses_mqtty_uri_default(self) -> None:
         stdout = io.StringIO()
@@ -154,6 +160,78 @@ class MQTTYDiscoveryTests(unittest.TestCase):
 
         list_ports.assert_called_once_with('mqtt://broker.local/testbench/test-host', 1.0)
         self.assertEqual(stdout.getvalue(), 'mqtt://broker.local/testbench/test-host/port-a (/dev/ttyACM0)\n')
+
+    def test_list_uses_serial_bridge_config_and_keeps_configured_scope_local(self) -> None:
+        stdout = io.StringIO()
+        config = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1885, topic_base='testbench/serial'),
+            usb_match=None,
+        )
+        ports = [
+            AvailableSerialPort('port-a', '/dev/ttyUSB0'),
+            AvailableSerialPort('remote-host/port-b', '/dev/ttyACM0'),
+        ]
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', return_value=(config, Path('/etc/mqtty-serial-bridge.toml'))),
+            patch('mqtty.mqtty.socket.gethostname', return_value='some-other-host'),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
+            patch('mqtty.mqtty.sys.stdout', stdout),
+        ):
+            main(['-l'])
+
+        list_ports.assert_called_once_with('mqtt://broker.local:1885/testbench/serial', 1.0)
+        self.assertEqual(stdout.getvalue(), 'mqtt://broker.local:1885/testbench/serial/port-a (/dev/ttyUSB0)\n')
+
+    def test_list_all_includes_nested_hosts_below_bridge_config_scope(self) -> None:
+        stdout = io.StringIO()
+        config = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1885, topic_base='testbench/serial'),
+            usb_match=None,
+        )
+        ports = [
+            AvailableSerialPort('port-a', '/dev/ttyUSB0'),
+            AvailableSerialPort('remote-host/port-b', '/dev/ttyACM0'),
+        ]
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', return_value=(config, Path('/etc/mqtty-serial-bridge.toml'))),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports),
+            patch('mqtty.mqtty.sys.stdout', stdout),
+        ):
+            main(['-la'])
+
+        self.assertEqual(
+            stdout.getvalue(),
+            'mqtt://broker.local:1885/testbench/serial/port-a (/dev/ttyUSB0)\n'
+            'mqtt://broker.local:1885/testbench/serial/remote-host/port-b (/dev/ttyACM0)\n',
+        )
+
+    def test_dev_path_uses_serial_bridge_config_for_discovery(self) -> None:
+        config = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/serial'),
+            usb_match=None,
+        )
+        ports = [
+            AvailableSerialPort('port-a', '/dev/ttyUSB0'),
+            AvailableSerialPort('remote-host/port-b', '/dev/ttyUSB0'),
+        ]
+        bridge = MagicMock()
+        bridge.slave_name = None
+        mqtty_cls = MagicMock(return_value=bridge)
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', return_value=(config, Path('/etc/mqtty-serial-bridge.toml'))),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
+            patch('mqtty.mqtty.MQTTY', mqtty_cls),
+            patch('mqtty.mqtty.install_signal_handlers'),
+        ):
+            main(['/dev/ttyUSB0'])
+
+        list_ports.assert_called_once_with('mqtt://broker.local:1883/testbench/serial', 1.0)
+        mqtty_cls.assert_called_once_with('mqtt://broker.local:1883/testbench/serial/port-a', False)
+        bridge.start_threads.assert_called_once_with()
+        bridge.stdio_to_mqtt.assert_called_once_with()
 
     def test_list_explicit_uri_overrides_mqtty_uri_default(self) -> None:
         with (
