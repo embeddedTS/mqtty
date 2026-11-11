@@ -7,10 +7,10 @@ This is useful for debugging, automation, or tunneling serial communication thro
 ## Commands
 
 ```bash
-mqtty mqtt://<host>/<topic> [--pts-only]
-mqtty <path-below-$MQTTY_URI> [--pts-only]
-mqtty /dev/ttyUSB0
-mqtty --list [mqtt://<host>/<topic-base>]
+mqtty [-b <baud-rate>] mqtt://<host>/<topic> [--pts-only]
+mqtty [-b <baud-rate>] <path-below-$MQTTY_URI> [--pts-only]
+mqtty [--config /path/to/mqtty-serial-bridge.toml] /dev/ttyUSB0
+mqtty --list [mqtt://<host>/<topic-base>] [--config /path/to/mqtty-serial-bridge.toml]
 ```
 
 `mqtty` runs in bidirectional terminal mode by default:
@@ -20,14 +20,23 @@ mqtty --list [mqtt://<host>/<topic-base>]
 * if `stdin` is a TTY, it is placed into raw mode while `mqtty` is running
 * type `Ctrl-A Ctrl-X` to exit, matching picocom's default exit sequence
 * type `Ctrl-A Ctrl-A` to send a literal `Ctrl-A`
+* before forwarding data, mqtty asks the serial bridge to activate the port and waits for a ready response
+* the default serial baud rate is 115200
 
-Pass the local device alias, such as `/dev/ttyUSB0`, to resolve it through discovery and connect to its MQTT topic:
+Use `-b` or `--baud-rate` to request a different baud rate for the connected device:
+
+```bash
+mqtty -b 9600 mqtt://broker.local/mydevice
+mqtty -b 57600 /dev/ttyACM0
+```
+
+Pass the local device alias, such as `/dev/ttyUSB0`, to resolve it through discovery and connect to its MQTT topic. When `MQTTY_URI` is unset, mqtty reads the broker and topic base from `/etc/mqtty-serial-bridge.toml`, the default config used by `mqtty-serial-bridge`:
 
 ```bash
 mqtty /dev/ttyUSB0
 ```
 
-This requires `MQTTY_URI` to point to the broker and topic base where the device is advertised. It uses the same terminal and MQTT behavior as connecting by the device's topic path or another alias.
+Use `--config` to select a different bridge config file. The configured topic base scopes discovery to that bridge, so local listing includes devices below it without requiring hostname segments in device paths. For `/dev/...` aliases and `mqtty -l` without a URI, an available bridge config takes precedence over `MQTTY_URI`; pass a full `mqtt://` URI to select a different scope. Device paths must exactly match the advertised alias, including `/dev/`.
 
 Use `--pts-only` if you only want a PTY device:
 
@@ -37,7 +46,7 @@ Use `--pts-only` if you only want a PTY device:
 Use `--list` to discover serial ports below a base topic:
 
 * `--list`, `-l`:
-  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print devices advertised by the local hostname, and exit. If no URI is provided, `MQTTY_URI` is used.
+  Subscribe below `<topic-base>` for retained `.../_mqtty/available` discovery messages, print local bridge devices, and exit. If no URI is provided, mqtty uses `MQTTY_URI` or the bridge config's broker and topic base. With the bridge config, direct device entries under `topic_base` are local; `-a` includes nested host paths too.
 * `-a` with `--list` (for example, `-la`):
   Include devices advertised by all hostnames below the topic base.
 * `--list-timeout`:
@@ -77,11 +86,13 @@ And publishes:
 * `<topic_base>/<port>/device_serial_output`
 * retained `<topic_base>/<port>/_mqtty/available`
 
-The retained availability payload is JSON:
+The retained availability payload is JSON and is published as soon as the bridge opens a device; it does not wait for serial output:
 
 ```json
-{"port":"<port>","alias":"<alias>"}
+{"port":"<port>","alias":"<alias>","active":true,"baud_rate":115200}
 ```
+
+The bridge listens on `<topic_base>/<port>/_mqtty/control` for activation and baud-rate commands, and replies on `<topic_base>/<port>/_mqtty/status`. Control messages are non-retained JSON with a request ID; status replies acknowledge whether the port is open and report its baud rate. Serial bytes continue to use `device_serial_input` and `device_serial_output` unchanged.
 
 The MQTT broker stores retained discovery messages, so clients only need to connect to the broker. The bridge does not use a database. The bridge clears a port's retained availability message during normal unplug and shutdown paths. If the bridge process crashes before cleanup, removed ports may remain listed until the bridge restarts or the retained messages are cleared from the broker.
 

@@ -19,7 +19,14 @@ from paho.mqtt.reasoncodes import ReasonCode
 
 from mqtty.mqtt_common import (
     availability_topic,
+    control_subscribe_topic,
+    extract_control_port_name,
+    status_topic,
+)
+from mqtty.mqtt_common import (
     join_topic_path as join_topic_path,
+)
+from mqtty.mqtt_common import (
     split_topic_path as split_topic_path,
 )
 
@@ -63,6 +70,8 @@ class SerialPortState:
     serial_output_topic: str
     real_device_path: str
     alias: str
+    baud_rate: int = DEFAULT_BAUD_RATE
+    io_lock: Any = field(default_factory=threading.RLock)
 
 
 def extract_port_name(topic: str, topic_base: str) -> str | None:
@@ -189,7 +198,10 @@ class SerialBridge:
         ) -> None:
             if reason_code == 0:
                 logger.info('Connected to MQTT broker')
-                client.subscribe(self.input_subscribe_topic)
+                client.subscribe([
+                    (self.input_subscribe_topic, 0),
+                    (control_subscribe_topic(self.cfg.mqtt.topic_base), 0),
+                ])
             else:
                 logger.error('MQTT connection failed with code %s', reason_code)
 
@@ -207,6 +219,14 @@ class SerialBridge:
             _userdata: Any,
             message: MQTTMessage,
         ) -> None:
+            control_port = extract_control_port_name(message.topic, self.cfg.mqtt.topic_base)
+            if control_port is not None:
+                if message.retain:
+                    logger.warning('Ignoring retained control message for %s', control_port)
+                    return
+                self.handle_control_message(control_port, message.payload)
+                return
+
             port_name = extract_port_name(message.topic, self.cfg.mqtt.topic_base)
             if port_name is None:
                 return
@@ -219,7 +239,8 @@ class SerialBridge:
                 return
 
             try:
-                state.connection.write(message.payload)
+                with state.io_lock:
+                    state.connection.write(message.payload)
             except Exception as exc:
                 logger.error('Error writing to UART %s: %s', port_name, exc)
 
@@ -310,13 +331,82 @@ class SerialBridge:
 
         return real_dev_path
 
-    def publish_port_availability(self, port: str, alias: str) -> None:
-        payload = json.dumps({'port': port, 'alias': alias}, separators=(',', ':'))
+    def publish_port_availability(self, port: str, alias: str, baud_rate: int = DEFAULT_BAUD_RATE) -> None:
+        payload = json.dumps(
+            {'port': port, 'alias': alias, 'active': True, 'baud_rate': baud_rate},
+            separators=(',', ':'),
+        )
         self.mqtt_client.publish(
             availability_topic(self.cfg.mqtt.topic_base, port),
             payload,
             retain=True,
         )
+
+    def publish_control_status(
+        self,
+        port: str,
+        request_id: str | None,
+        ok: bool,
+        active: bool,
+        baud_rate: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            'request_id': request_id,
+            'ok': ok,
+            'active': active,
+        }
+        if baud_rate is not None:
+            payload['baud_rate'] = baud_rate
+        if error is not None:
+            payload['error'] = error
+        self.mqtt_client.publish(
+            status_topic(self.cfg.mqtt.topic_base, port),
+            json.dumps(payload, separators=(',', ':')),
+            qos=1,
+            retain=False,
+        )
+
+    def handle_control_message(self, port: str, payload: bytes) -> None:
+        request_id: str | None = None
+        state: SerialPortState | None = None
+        try:
+            message = json.loads(payload.decode('utf-8'))
+            if not isinstance(message, dict):
+                raise ValueError('control message must be a JSON object')
+            request_id_raw = message.get('request_id')
+            request_id = str(request_id_raw) if request_id_raw is not None else None
+            command = message.get('command')
+            if command not in {'activate', 'set_baud_rate'}:
+                raise ValueError(f'unsupported command {command!r}')
+
+            with self._state_lock:
+                state = self.serial_ports.get(port)
+            if state is None:
+                self.publish_control_status(port, request_id, False, False, error='serial port is not open')
+                return
+
+            requested_baud = message.get('baud_rate')
+            if command == 'set_baud_rate' and requested_baud is None:
+                raise ValueError('set_baud_rate requires baud_rate')
+            if requested_baud is not None:
+                if isinstance(requested_baud, bool) or not isinstance(requested_baud, int) or requested_baud <= 0:
+                    raise ValueError('baud_rate must be a positive integer')
+                with state.io_lock:
+                    state.connection.baudrate = requested_baud
+                    state.baud_rate = requested_baud
+            self.publish_port_availability(port, state.alias, state.baud_rate)
+            self.publish_control_status(port, request_id, True, True, baud_rate=state.baud_rate)
+        except Exception as exc:
+            logger.warning('Invalid control message for %s: %s', port, exc)
+            self.publish_control_status(
+                port,
+                request_id,
+                False,
+                state is not None,
+                baud_rate=state.baud_rate if state is not None else None,
+                error=str(exc),
+            )
 
     def clear_port_availability(self, port: str) -> None:
         self.mqtt_client.publish(
@@ -376,11 +466,12 @@ class SerialBridge:
                 serial_output_topic=serial_output_topic,
                 real_device_path=resolved_real_dev_path,
                 alias=alias,
+                baud_rate=self.baud_rate,
             )
             with self._state_lock:
                 self.serial_ports[port] = state
             thread.start()
-            self.publish_port_availability(port, alias)
+            self.publish_port_availability(port, alias, state.baud_rate)
         except Exception as exc:
             logger.error('Failed to open %s: %s', port, exc)
             if real_dev_path:
@@ -415,7 +506,12 @@ class SerialBridge:
                 if not readable:
                     continue
 
-                data = serial_conn.read(serial_conn.in_waiting or 1)
+                with self._state_lock:
+                    state = self.serial_ports.get(port)
+                if state is None:
+                    break
+                with state.io_lock:
+                    data = serial_conn.read(serial_conn.in_waiting or 1)
                 if data:
                     self.mqtt_client.publish(serial_output_topic, data)
         except Exception as exc:

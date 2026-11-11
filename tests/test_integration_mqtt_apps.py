@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import pty
 import queue
@@ -175,6 +176,49 @@ class MQTTTestClient:
             self.client.loop_stop()
 
 
+class MQTTActivationResponder:
+    def __init__(self, host: str, port: int, device_topic_base: str) -> None:
+        self._connected = threading.Event()
+        self.control_topic = f"{device_topic_base}/_mqtty/control"
+        self.status_topic = f"{device_topic_base}/_mqtty/status"
+        self.client = Client(callback_api_version=CallbackAPIVersion.VERSION2)
+        self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
+        self.client.connect(host, port)
+        self.client.loop_start()
+        if not self._connected.wait(timeout=5.0):
+            self.close()
+            raise TimeoutError("timed out waiting for MQTT activation responder")
+
+    def _on_connect(
+        self,
+        client: Client,
+        _userdata: object,
+        _flags: dict[str, object],
+        reason_code: object,
+        _properties: object,
+    ) -> None:
+        if reason_code == 0:
+            client.subscribe(self.control_topic)
+            self._connected.set()
+
+    def _on_message(self, client: Client, _userdata: object, msg: MQTTMessage) -> None:
+        request = json.loads(msg.payload.decode("utf-8"))
+        response = {
+            "request_id": request["request_id"],
+            "ok": True,
+            "active": True,
+            "baud_rate": request["baud_rate"],
+        }
+        client.publish(self.status_topic, json.dumps(response), qos=1, retain=False)
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self.client.disconnect()
+        with contextlib.suppress(Exception):
+            self.client.loop_stop()
+
+
 class MQTTAppsIntegrationTests(unittest.TestCase):
     broker: MosquittoBroker
 
@@ -195,6 +239,12 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
         return f"mqtt://127.0.0.1:{self.broker.port}/{base_path}"
 
     def test_mqtty_pts_round_trip_with_real_broker(self) -> None:
+        responder = MQTTActivationResponder(
+            "127.0.0.1",
+            self.broker.port,
+            "itest/mqtty/device-a",
+        )
+        self.addCleanup(responder.close)
         bridge = MQTTY(self.mqtt_uri("itest/mqtty/device-a"), use_pty=True)
         self.addCleanup(bridge.shutdown)
 
@@ -222,6 +272,12 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
 
     def test_mqtty_pts_only_detaches_after_bridge_is_ready(self) -> None:
         mqtt_uri = self.mqtt_uri("itest/mqtty/detached-device")
+        responder = MQTTActivationResponder(
+            "127.0.0.1",
+            self.broker.port,
+            "itest/mqtty/detached-device",
+        )
+        self.addCleanup(responder.close)
         process = subprocess.Popen(
             [sys.executable, "-m", "mqtty.mqtty", mqtt_uri, "--pts-only"],
             stdout=subprocess.PIPE,
@@ -292,6 +348,11 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
             subscriber = MQTTTestClient("127.0.0.1", self.broker.port)
             self.addCleanup(subscriber.close)
             subscriber.subscribe(output_topic)
+            availability = join_topic_path(cfg.mqtt.topic_base, port_name, "_mqtty", "available")
+            subscriber.subscribe(availability)
+            availability_payload = json.loads(subscriber.wait_for_message(availability))
+            self.assertTrue(availability_payload["active"])
+            self.assertEqual(availability_payload["baud_rate"], 115200)
 
             publisher = MQTTTestClient("127.0.0.1", self.broker.port)
             self.addCleanup(publisher.close)
@@ -314,6 +375,51 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
             serial_to_mqtt_again = b"serial-output-2"
             os.write(master_fd, serial_to_mqtt_again)
             self.assertEqual(subscriber.wait_for_message(output_topic), serial_to_mqtt_again)
+
+    def test_mqtty_activation_delivers_first_byte_and_sets_requested_baud(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host="127.0.0.1", port=self.broker.port, topic_base="itest/serial-activate"),
+            usb_match=None,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            serial_base = Path(temp_dir)
+            port_name = "fake-serial-device"
+            master_fd, slave_fd = pty.openpty()
+            self.addCleanup(lambda: os.close(master_fd))
+            self.addCleanup(lambda: os.close(slave_fd))
+            os.symlink(os.ttyname(slave_fd), serial_base / port_name)
+
+            bridge = SerialBridge(cfg, serial_base_path=serial_base, scan_interval_s=0.05)
+            patcher = patch("mqtty.serial_bridge.vid_pid_from_symlink", return_value=("1a86", "7523"))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            bridge_thread = threading.Thread(target=bridge.run, daemon=True)
+            bridge_thread.start()
+
+            def stop_bridge() -> None:
+                bridge.stop()
+                bridge_thread.join(timeout=5.0)
+
+            self.addCleanup(stop_bridge)
+            self.assertTrue(wait_until(lambda: port_name in bridge.serial_ports, timeout_s=5.0))
+
+            mqtty_bridge = MQTTY(
+                self.mqtt_uri(f"itest/serial-activate/{port_name}"),
+                use_pty=True,
+                baud_rate=9600,
+            )
+            self.addCleanup(mqtty_bridge.shutdown)
+            mqtty_bridge.start_threads()
+            self.assertTrue(mqtty_bridge.connected_event.wait(timeout=5.0))
+            self.assertEqual(bridge.serial_ports[port_name].connection.baudrate, 9600)
+
+            assert mqtty_bridge.slave_name is not None
+            client_fd = os.open(mqtty_bridge.slave_name, os.O_RDWR | os.O_NOCTTY)
+            self.addCleanup(lambda: os.close(client_fd))
+            first_byte = b"first-byte-before-device-output"
+            os.write(client_fd, first_byte)
+            self.assertEqual(read_exact(master_fd, len(first_byte), timeout_s=5.0), first_byte)
 
     def test_serial_bridge_honors_usb_allow_list(self) -> None:
         cfg = SerialBridgeConfig(
