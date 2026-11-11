@@ -158,6 +158,15 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn('mqtt_uri is required unless MQTTY_URI or a bridge config is available', stderr.getvalue())
 
+    def test_all_requires_list_option(self) -> None:
+        stderr = io.StringIO()
+        with patch('mqtty.mqtty.sys.stderr', stderr):
+            with self.assertRaises(SystemExit) as ctx:
+                main(['-a'])
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn('-a can only be used with --list', stderr.getvalue())
+
     def test_list_uses_mqtty_uri_default(self) -> None:
         stdout = io.StringIO()
         ports = [AvailableSerialPort('port-a', '/dev/ttyACM0')]
