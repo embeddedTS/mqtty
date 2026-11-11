@@ -435,7 +435,10 @@ def is_bare_serial_name(mqtt_uri: str) -> bool:
 
 
 def matching_available_ports(query: str, available_ports: list[AvailableSerialPort]) -> list[AvailableSerialPort]:
-    return [available_port for available_port in available_ports if query in {available_port.port, available_port.alias}]
+    alias_matches = [available_port for available_port in available_ports if available_port.alias == query]
+    if alias_matches:
+        return alias_matches
+    return [available_port for available_port in available_ports if available_port.port == query]
 
 
 def resolve_mqtt_uri(
@@ -513,7 +516,14 @@ def main(argv: list[str] | None = None) -> None:
     try:
         default_uri = os.environ.get(MQTTY_URI_ENV)
         default_uri_from_bridge_config = False
-        if default_uri is None and (args.mqtt_uri is None or not is_full_mqtt_uri(args.mqtt_uri)):
+        needs_default_uri = args.mqtt_uri is None or not is_full_mqtt_uri(args.mqtt_uri)
+        prefers_bridge_config = (
+            args.config is not None
+            or (args.list and args.mqtt_uri is None)
+            or (args.mqtt_uri is not None and args.mqtt_uri.startswith("/dev/"))
+            or default_uri is None
+        )
+        if needs_default_uri and prefers_bridge_config:
             if args.config is not None:
                 config, _config_path = load_config_with_fallback(args.config)
                 default_uri = mqtt_uri_from_bridge_config(config)

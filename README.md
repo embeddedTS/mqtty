@@ -27,7 +27,7 @@ Pass the local device alias, such as `/dev/ttyUSB0`, to resolve it through disco
 mqtty /dev/ttyUSB0
 ```
 
-Use `--config` to select a different bridge config file. The configured topic base scopes discovery to that bridge, so local listing includes devices below it without requiring hostname segments in device paths. `MQTTY_URI`, when set, continues to override the config default.
+Use `--config` to select a different bridge config file. The configured topic base scopes discovery to that bridge, so local listing includes devices below it without requiring hostname segments in device paths. For `/dev/...` aliases and `mqtty -l` without a URI, an available bridge config takes precedence over `MQTTY_URI`; pass a full `mqtt://` URI to select a different scope.
 
 Use `--pts-only` if you only want a PTY device:
 

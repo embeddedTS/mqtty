@@ -88,6 +88,17 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
         )
 
+    def test_resolve_mqtt_uri_prefers_alias_before_matching_topic_path(self) -> None:
+        ports = [
+            AvailableSerialPort('console', 'usb-a'),
+            AvailableSerialPort('port-b', 'console'),
+        ]
+
+        self.assertEqual(
+            resolve_mqtt_uri('console', 'mqtt://broker.local/testbench', ports),
+            'mqtt://broker.local/testbench/port-b',
+        )
+
     def test_resolve_mqtt_uri_expands_dev_path_alias_against_default(self) -> None:
         ports = [AvailableSerialPort('port-a', '/dev/ttyUSB0')]
 
@@ -152,6 +163,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         ports = [AvailableSerialPort('port-a', '/dev/ttyACM0')]
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/test-host'}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', side_effect=FileNotFoundError('no config')),
             patch('mqtty.mqtty.socket.gethostname', return_value='test-host'),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
             patch('mqtty.mqtty.sys.stdout', stdout),
@@ -172,7 +184,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             AvailableSerialPort('remote-host/port-b', '/dev/ttyACM0'),
         ]
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
             patch('mqtty.mqtty.load_config_with_fallback', return_value=(config, Path('/etc/mqtty-serial-bridge.toml'))),
             patch('mqtty.mqtty.socket.gethostname', return_value='some-other-host'),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
@@ -194,7 +206,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             AvailableSerialPort('remote-host/port-b', '/dev/ttyACM0'),
         ]
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
             patch('mqtty.mqtty.load_config_with_fallback', return_value=(config, Path('/etc/mqtty-serial-bridge.toml'))),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports),
             patch('mqtty.mqtty.sys.stdout', stdout),
@@ -220,7 +232,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         bridge.slave_name = None
         mqtty_cls = MagicMock(return_value=bridge)
         with (
-            patch.dict(os.environ, {}, clear=True),
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
             patch('mqtty.mqtty.load_config_with_fallback', return_value=(config, Path('/etc/mqtty-serial-bridge.toml'))),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
             patch('mqtty.mqtty.MQTTY', mqtty_cls),
@@ -250,6 +262,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         ]
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', side_effect=FileNotFoundError('no config')),
             patch('mqtty.mqtty.socket.gethostname', return_value='workstation-a'),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports),
             patch('mqtty.mqtty.sys.stdout', stdout),
@@ -266,6 +279,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         ]
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', side_effect=FileNotFoundError('no config')),
             patch('mqtty.mqtty.socket.gethostname', return_value='workstation-a'),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports),
             patch('mqtty.mqtty.sys.stdout', stdout),
@@ -285,6 +299,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         mqtty_cls = MagicMock(return_value=bridge)
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', side_effect=FileNotFoundError('no config')),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
             patch('mqtty.mqtty.MQTTY', mqtty_cls),
             patch('mqtty.mqtty.install_signal_handlers'),
@@ -306,6 +321,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         mqtty_cls = MagicMock(return_value=bridge)
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback', side_effect=FileNotFoundError('no config')),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
             patch('mqtty.mqtty.MQTTY', mqtty_cls),
             patch('mqtty.mqtty.install_signal_handlers'),
