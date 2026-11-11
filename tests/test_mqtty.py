@@ -11,6 +11,7 @@ from mqtty.mqtty import (
     CONNECTION_NOTICE,
     MQTTY,
     available_port_from_message,
+    decode_terminal_escape,
     discovered_port_uri,
     main,
     resolve_mqtt_uri,
@@ -132,6 +133,35 @@ class MQTTYDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn('mqtt_uri is required unless MQTTY_URI is set', stderr.getvalue())
+
+    def test_main_opens_local_dev_device_without_mqtt_uri(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('mqtty.mqtty.local_serial_terminal') as local_terminal,
+        ):
+            main(['/dev/ttyUSB0'])
+
+        local_terminal.assert_called_once_with('/dev/ttyUSB0', 115200)
+
+    def test_main_passes_custom_baud_rate_to_local_device(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('mqtty.mqtty.local_serial_terminal') as local_terminal,
+        ):
+            main(['--baud-rate', '9600', '/dev/ttyUSB0'])
+
+        local_terminal.assert_called_once_with('/dev/ttyUSB0', 9600)
+
+    def test_decode_terminal_escape_handles_sequence_split_across_reads(self) -> None:
+        first, should_exit, escape_pending = decode_terminal_escape(b'\x01')
+        self.assertEqual(first, b'')
+        self.assertFalse(should_exit)
+        self.assertTrue(escape_pending)
+
+        second, should_exit, escape_pending = decode_terminal_escape(b'\x18', escape_pending)
+        self.assertEqual(second, b'')
+        self.assertTrue(should_exit)
+        self.assertFalse(escape_pending)
 
     def test_list_uses_mqtty_uri_default(self) -> None:
         stdout = io.StringIO()
