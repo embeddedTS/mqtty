@@ -514,6 +514,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--list cannot be combined with --pts-only")
     if args.all and not args.list:
         parser.error("-a can only be used with --list")
+    if args.mqtt_uri is None and not args.list:
+        parser.error("mqtt_uri is required unless --list is specified")
 
     try:
         default_uri = os.environ.get(MQTTY_URI_ENV)

@@ -167,6 +167,20 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn('-a can only be used with --list', stderr.getvalue())
 
+    def test_main_requires_device_uri_even_when_default_is_configured(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/serial'}, clear=True),
+            patch('mqtty.mqtty.load_config_with_fallback') as load_config,
+            patch('mqtty.mqtty.sys.stderr', stderr),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main([])
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn('mqtt_uri is required unless --list is specified', stderr.getvalue())
+        load_config.assert_not_called()
+
     def test_list_uses_mqtty_uri_default(self) -> None:
         stdout = io.StringIO()
         ports = [AvailableSerialPort('port-a', '/dev/ttyACM0')]
