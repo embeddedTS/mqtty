@@ -11,6 +11,8 @@ MQTTScheme = Literal["mqtt", "ws", "wss"]
 MQTTTransport = Literal["tcp", "websockets"]
 DISCOVERY_META_TOPIC = "_mqtty"
 DISCOVERY_AVAILABLE_TOPIC = "available"
+CONTROL_TOPIC = "control"
+STATUS_TOPIC = "status"
 
 DEFAULT_PORTS: dict[MQTTScheme, int] = {
     "mqtt": 1883,
@@ -71,6 +73,32 @@ def availability_topic(topic_base: str, port: str) -> str:
 
 def availability_subscribe_topic(topic_base: str) -> str:
     return join_topic_path(topic_base, "#")
+
+
+def control_topic(topic_base: str, port: str) -> str:
+    return join_topic_path(topic_base, port, DISCOVERY_META_TOPIC, CONTROL_TOPIC)
+
+
+def control_subscribe_topic(topic_base: str) -> str:
+    return join_topic_path(topic_base, "+", DISCOVERY_META_TOPIC, CONTROL_TOPIC)
+
+
+def status_topic(topic_base: str, port: str) -> str:
+    return join_topic_path(topic_base, port, DISCOVERY_META_TOPIC, STATUS_TOPIC)
+
+
+def extract_control_port_name(topic: str, topic_base: str) -> str | None:
+    topic_parts = split_topic_path(topic)
+    base_parts = split_topic_path(topic_base)
+
+    if len(topic_parts) != len(base_parts) + 3:
+        return None
+    if topic_parts[: len(base_parts)] != base_parts:
+        return None
+    if topic_parts[-2:] != (DISCOVERY_META_TOPIC, CONTROL_TOPIC):
+        return None
+
+    return topic_parts[-3]
 
 
 def extract_available_path(topic: str, topic_base: str) -> str | None:

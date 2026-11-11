@@ -13,6 +13,7 @@ import termios
 import threading
 import time
 import tty
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,13 +24,16 @@ from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
 
 from mqtty.mqtt_common import (
+    CONTROL_TOPIC,
+    DISCOVERY_META_TOPIC,
+    STATUS_TOPIC,
     MQTTConnectionInfo,
     availability_subscribe_topic,
     connect_and_loop_forever,
     create_client,
     extract_available_path,
 )
-from mqtty.serial_bridge import SerialBridgeConfig, load_config_with_fallback
+from mqtty.serial_bridge import DEFAULT_BAUD_RATE, SerialBridgeConfig, load_config_with_fallback
 
 PICOCOM_ESCAPE = 0x01
 PICOCOM_EXIT = 0x18
@@ -61,12 +65,16 @@ def raw_tty_mode(fd: int) -> Iterator[None]:
 
 
 class MQTTY:
-    def __init__(self, mqtt_uri: str, use_pty: bool) -> None:
+    def __init__(self, mqtt_uri: str, use_pty: bool, baud_rate: int = DEFAULT_BAUD_RATE) -> None:
         self.connection = MQTTConnectionInfo.parse(mqtt_uri)
         self.use_pty = use_pty
+        self.baud_rate = baud_rate
 
         self.device_serial_input_topic = self.connection.topic("device_serial_input")
         self.device_serial_output_topic = self.connection.topic("device_serial_output")
+        self.control_topic = self.connection.topic(f"{DISCOVERY_META_TOPIC}/{CONTROL_TOPIC}")
+        self.status_topic = self.connection.topic(f"{DISCOVERY_META_TOPIC}/{STATUS_TOPIC}")
+        self.control_request_id = uuid.uuid4().hex
 
         self.mqtt_client = create_client(self.connection)
 
@@ -88,6 +96,8 @@ class MQTTY:
         self.startup_status_fd: Optional[int] = None
         self.startup_reported = False
         self.detached_startup = False
+        self.activation_error: str | None = None
+        self.activation_timer: threading.Timer | None = None
 
     def report_startup(self, status: bytes) -> None:
         """Report the detached PTY bridge's startup result to its parent once."""
@@ -101,7 +111,11 @@ class MQTTY:
                 os.close(self.startup_status_fd)
             self.startup_status_fd = None
 
-    def on_message(self, _client: Client, _userdata: object, msg: MQTTMessage) -> None:
+    def on_message(self, client: Client, _userdata: object, msg: MQTTMessage) -> None:
+        if msg.topic == self.status_topic:
+            self.handle_activation_status(client, msg.payload)
+            return
+
         try:
             if self.use_pty and self.master_fd is not None:
                 os.write(self.master_fd, msg.payload)
@@ -112,6 +126,64 @@ class MQTTY:
             self.shutdown()
         except Exception as e:
             sys.stderr.write(f"Error handling MQTT message: {e}\n")
+
+    def handle_activation_status(self, client: Client, payload: bytes) -> None:
+        try:
+            status = json.loads(payload.decode("utf-8"))
+            if not isinstance(status, dict) or status.get("request_id") != self.control_request_id:
+                return
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+
+        if not status.get("ok") or not status.get("active"):
+            self.activation_error = str(status.get("error", "serial bridge did not activate the port"))
+            sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
+            self.report_startup(STARTUP_FAILED)
+            self.stop_event.set()
+            client.disconnect()
+            return
+
+        if self.activation_timer is not None:
+            self.activation_timer.cancel()
+            self.activation_timer = None
+        self.connected = True
+        self.connected_event.set()
+        if not self.connection_notice_printed:
+            sys.stderr.write(CONNECTION_NOTICE)
+            self.connection_notice_printed = True
+        if self.detached_startup:
+            self.report_startup(STARTUP_READY)
+
+    def activation_timed_out(self) -> None:
+        if self.connected or self.stop_event.is_set():
+            return
+        self.activation_error = "timed out waiting for the serial bridge to activate the port"
+        sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
+        self.report_startup(STARTUP_FAILED)
+        self.stop_event.set()
+        with contextlib.suppress(Exception):
+            self.mqtt_client.disconnect()
+
+    def request_activation(self, client: Client) -> None:
+        payload = json.dumps(
+            {
+                "request_id": self.control_request_id,
+                "command": "activate",
+                "baud_rate": self.baud_rate,
+            },
+            separators=(",", ":"),
+        )
+        info = client.publish(self.control_topic, payload, qos=1, retain=False)
+        if int(info.rc) != 0:
+            self.activation_error = f"failed to send activation request, return code {info.rc}"
+            sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
+            self.report_startup(STARTUP_FAILED)
+            self.stop_event.set()
+            client.disconnect()
+            return
+        self.activation_timer = threading.Timer(5.0, self.activation_timed_out)
+        self.activation_timer.daemon = True
+        self.activation_timer.start()
 
     def mqtt_connect(self) -> None:
         self.mqtt_client.on_message = self.on_message
@@ -125,25 +197,24 @@ class MQTTY:
         ) -> None:
             del userdata, flags, properties
             if reason_code == 0:
-                result, _mid = client.subscribe(self.device_serial_output_topic)
+                result, _mid = client.subscribe(
+                    [
+                        (self.device_serial_output_topic, 0),
+                        (self.status_topic, 0),
+                    ]
+                )
                 if int(result) != 0:
-                    sys.stderr.write(f"Failed to subscribe to MQTT topic, return code {result}\n")
+                    self.activation_error = f"failed to subscribe to MQTT topics, return code {result}"
+                    sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
                     self.report_startup(STARTUP_FAILED)
-                    if self.detached_startup:
-                        self.stop_event.set()
-                        client.disconnect()
-                elif not self.detached_startup:
-                    self.connected = True
-                    self.connected_event.set()
-                    if not self.connection_notice_printed:
-                        sys.stderr.write(CONNECTION_NOTICE)
-                        self.connection_notice_printed = True
-            else:
-                sys.stderr.write(f"Failed to connect to MQTT broker, return code {reason_code}\n")
-                self.report_startup(STARTUP_FAILED)
-                if self.detached_startup:
                     self.stop_event.set()
                     client.disconnect()
+            else:
+                self.activation_error = f"MQTT connection failed, return code {reason_code}"
+                sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
+                self.report_startup(STARTUP_FAILED)
+                self.stop_event.set()
+                client.disconnect()
 
         def on_subscribe(
             client: Client,
@@ -153,20 +224,14 @@ class MQTTY:
             _properties: Optional[Properties],
         ) -> None:
             if any(reason_code >= 128 for reason_code in reason_codes):
-                sys.stderr.write("Failed to subscribe to MQTT topic\n")
+                self.activation_error = "failed to subscribe to MQTT topics"
+                sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
                 self.report_startup(STARTUP_FAILED)
-                if self.detached_startup:
-                    self.stop_event.set()
-                    client.disconnect()
+                self.stop_event.set()
+                client.disconnect()
                 return
 
-            if self.detached_startup:
-                self.connected = True
-                self.connected_event.set()
-                if not self.connection_notice_printed:
-                    sys.stderr.write(CONNECTION_NOTICE)
-                    self.connection_notice_printed = True
-                self.report_startup(STARTUP_READY)
+            self.request_activation(client)
 
         def on_disconnect(
             client: Client,
@@ -186,8 +251,12 @@ class MQTTY:
         try:
             connect_and_loop_forever(self.mqtt_client, self.connection)
         except Exception as e:
-            sys.stderr.write(f"MQTT connection failed: {e}\n")
+            if self.activation_error is None:
+                self.activation_error = f"MQTT connection failed: {e}"
+                sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
         finally:
+            if not self.connected and self.activation_error is None and not self.stop_event.is_set():
+                self.activation_error = "MQTT connection ended before bridge activation"
             self.report_startup(STARTUP_FAILED)
             self.connected = False
             self.connected_event.clear()
@@ -285,6 +354,9 @@ class MQTTY:
 
     def shutdown(self) -> None:
         self.stop_event.set()
+        if self.activation_timer is not None:
+            self.activation_timer.cancel()
+            self.activation_timer = None
         self.connected = False
         self.connected_event.clear()
         with contextlib.suppress(Exception):
@@ -503,6 +575,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Path to mqtty-serial-bridge config (default: /etc/mqtty-serial-bridge.toml)",
     )
     parser.add_argument(
+        "-b",
+        "--baud-rate",
+        type=int,
+        default=DEFAULT_BAUD_RATE,
+        help=f"UART baud rate to request from the serial bridge (default: {DEFAULT_BAUD_RATE})",
+    )
+    parser.add_argument(
         "-p",
         "--pts-only",
         action="store_true",
@@ -514,6 +593,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--list cannot be combined with --pts-only")
     if args.all and not args.list:
         parser.error("-a can only be used with --list")
+    if args.baud_rate <= 0:
+        parser.error("--baud-rate must be a positive integer")
     if args.mqtt_uri is None and not args.list:
         parser.error("mqtt_uri is required unless --list is specified")
 
@@ -571,17 +652,19 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.pts_only:
-            bridge = MQTTY(mqtt_uri, True)
+            bridge = MQTTY(mqtt_uri, True, args.baud_rate)
             if bridge.slave_name is None:
                 raise RuntimeError("Failed to create PTY device")
             child_pid = run_detached_pty_bridge(bridge)
             print(f"MQTTY_PTS={bridge.slave_name}")
             print(f"MQTTY_PID={child_pid}", flush=True)
         else:
-            bridge = MQTTY(mqtt_uri, False)
+            bridge = MQTTY(mqtt_uri, False, args.baud_rate)
             install_signal_handlers(bridge)
             bridge.start_threads()
             bridge.stdio_to_mqtt()
+            if bridge.activation_error is not None:
+                    raise SystemExit(1)
     except (OSError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         raise SystemExit(1) from e

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -253,6 +255,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         ]
         bridge = MagicMock()
         bridge.slave_name = None
+        bridge.activation_error = None
         mqtty_cls = MagicMock(return_value=bridge)
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench'}, clear=True),
@@ -264,7 +267,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             main(['/dev/ttyUSB0'])
 
         list_ports.assert_called_once_with('mqtt://broker.local:1883/testbench/serial', 1.0)
-        mqtty_cls.assert_called_once_with('mqtt://broker.local:1883/testbench/serial/port-a', False)
+        mqtty_cls.assert_called_once_with('mqtt://broker.local:1883/testbench/serial/port-a', False, 115200)
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
 
@@ -319,6 +322,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         ports = [AvailableSerialPort('pci-0000:12:00.3-usb-0:1.1.1.3:1.0', 'usb-c')]
         bridge = MagicMock()
         bridge.slave_name = None
+        bridge.activation_error = None
         mqtty_cls = MagicMock(return_value=bridge)
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
@@ -333,6 +337,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         mqtty_cls.assert_called_once_with(
             'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
             False,
+            115200,
         )
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
@@ -341,6 +346,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         ports = [AvailableSerialPort('port-a', '/dev/ttyUSB0')]
         bridge = MagicMock()
         bridge.slave_name = None
+        bridge.activation_error = None
         mqtty_cls = MagicMock(return_value=bridge)
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
@@ -352,7 +358,23 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             main(['/dev/ttyUSB0'])
 
         list_ports.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop', 1.0)
-        mqtty_cls.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop/port-a', False)
+        mqtty_cls.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop/port-a', False, 115200)
+        bridge.start_threads.assert_called_once_with()
+        bridge.stdio_to_mqtt.assert_called_once_with()
+
+    def test_main_passes_baud_rate_to_bridge(self) -> None:
+        bridge = MagicMock()
+        bridge.slave_name = None
+        bridge.activation_error = None
+        mqtty_cls = MagicMock(return_value=bridge)
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch('mqtty.mqtty.MQTTY', mqtty_cls),
+            patch('mqtty.mqtty.install_signal_handlers'),
+        ):
+            main(['-b', '9600', 'mqtt://broker.local/testbench/port-a'])
+
+        mqtty_cls.assert_called_once_with('mqtt://broker.local/testbench/port-a', False, 9600)
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
 
@@ -382,8 +404,23 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             assert on_connect is not None
             assert on_subscribe is not None
             bridge.mqtt_client.subscribe = MagicMock(return_value=(0, 1))
+            bridge.mqtt_client.publish = MagicMock(return_value=SimpleNamespace(rc=0))
             on_connect(bridge.mqtt_client, None, {}, 0, None)
             on_subscribe(bridge.mqtt_client, None, 1, [0], None)
+            payload = json.dumps(
+                {
+                    'request_id': bridge.control_request_id,
+                    'ok': True,
+                    'active': True,
+                    'baud_rate': 115200,
+                }
+            ).encode()
+            on_message = cast(Any, bridge.mqtt_client.on_message)
+            on_message(
+                bridge.mqtt_client,
+                None,
+                SimpleNamespace(topic=bridge.status_topic, payload=payload),
+            )
 
         with (
             patch('mqtty.mqtty.connect_and_loop_forever', side_effect=connect_once),
@@ -393,6 +430,14 @@ class MQTTYDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(stderr.getvalue(), CONNECTION_NOTICE)
         self.assertTrue(bridge.connection_notice_printed)
+        publish_call = bridge.mqtt_client.publish.call_args
+        self.assertEqual(publish_call.args[0], 'testbench/port-a/_mqtty/control')
+        self.assertEqual(
+            json.loads(publish_call.args[1]),
+            {'request_id': bridge.control_request_id, 'command': 'activate', 'baud_rate': 115200},
+        )
+        self.assertEqual(publish_call.kwargs, {'qos': 1, 'retain': False})
+        bridge.shutdown()
 
 
 if __name__ == '__main__':

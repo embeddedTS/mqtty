@@ -150,7 +150,12 @@ class SerialBridgeMQTTTests(unittest.TestCase):
         callback_client = MagicMock()
         callback(callback_client, None, {}, _EqZeroNoInt(), None)
 
-        callback_client.subscribe.assert_called_once_with('testbench/mark-desktop/+/device_serial_input')
+        callback_client.subscribe.assert_called_once_with(
+            [
+                ('testbench/mark-desktop/+/device_serial_input', 0),
+                ('testbench/mark-desktop/+/_mqtty/control', 0),
+            ]
+        )
 
     def test_port_alias_prefers_config_then_alias_file_then_real_path(self) -> None:
         port = 'platform-ci_hdrc.1-usb-0:1.4.3.2:1.0'
@@ -205,8 +210,45 @@ class SerialBridgeMQTTTests(unittest.TestCase):
         bridge.mqtt_client.publish.assert_called_once()
         topic, payload = bridge.mqtt_client.publish.call_args.args
         self.assertEqual(topic, 'testbench/mark-desktop/port-a/_mqtty/available')
-        self.assertEqual(json.loads(payload), {'port': 'port-a', 'alias': '/dev/ttyACM0'})
+        self.assertEqual(
+            json.loads(payload),
+            {'port': 'port-a', 'alias': '/dev/ttyACM0', 'active': True, 'baud_rate': 115200},
+        )
         self.assertTrue(bridge.mqtt_client.publish.call_args.kwargs['retain'])
+
+    def test_activate_control_sets_requested_baud_and_returns_active_status(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host='broker.local', port=1883, topic_base='testbench/mark-desktop'),
+            usb_match=None,
+        )
+        bridge = SerialBridge(cfg)
+        bridge.mqtt_client = MagicMock()
+        connection = MagicMock()
+        state = SerialPortState(
+            connection=connection,
+            thread=MagicMock(),
+            serial_output_topic='testbench/mark-desktop/port-a/device_serial_output',
+            real_device_path='/dev/ttyACM0',
+            alias='/dev/ttyACM0',
+        )
+        bridge.serial_ports['port-a'] = state
+
+        bridge.handle_control_message(
+            'port-a',
+            b'{"request_id":"request-1","command":"activate","baud_rate":9600}',
+        )
+
+        self.assertEqual(state.baud_rate, 9600)
+        self.assertEqual(connection.baudrate, 9600)
+        self.assertEqual(bridge.mqtt_client.publish.call_count, 2)
+        availability_call, status_call = bridge.mqtt_client.publish.call_args_list
+        self.assertEqual(json.loads(availability_call.args[1])['baud_rate'], 9600)
+        self.assertEqual(status_call.args[0], 'testbench/mark-desktop/port-a/_mqtty/status')
+        self.assertEqual(
+            json.loads(status_call.args[1]),
+            {'request_id': 'request-1', 'ok': True, 'active': True, 'baud_rate': 9600},
+        )
+        self.assertEqual(status_call.kwargs, {'qos': 1, 'retain': False})
 
     def test_clear_port_availability_clears_retained_topic(self) -> None:
         cfg = SerialBridgeConfig(
