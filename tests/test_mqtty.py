@@ -138,6 +138,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         ports = [AvailableSerialPort('port-a', '/dev/ttyACM0')]
         with (
             patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch('mqtty.mqtty.socket.gethostname', return_value='mark-desktop'),
             patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
             patch('mqtty.mqtty.sys.stdout', stdout),
         ):
