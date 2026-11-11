@@ -11,7 +11,6 @@ from mqtty.mqtty import (
     CONNECTION_NOTICE,
     MQTTY,
     available_port_from_message,
-    decode_terminal_escape,
     discovered_port_uri,
     main,
     resolve_mqtt_uri,
@@ -87,6 +86,14 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
         )
 
+    def test_resolve_mqtt_uri_expands_dev_path_alias_against_default(self) -> None:
+        ports = [AvailableSerialPort('port-a', '/dev/ttyUSB0')]
+
+        self.assertEqual(
+            resolve_mqtt_uri('/dev/ttyUSB0', 'mqtt://broker.local/testbench/mark-desktop', ports),
+            'mqtt://broker.local/testbench/mark-desktop/port-a',
+        )
+
     def test_resolve_mqtt_uri_expands_discovered_port_against_default(self) -> None:
         ports = [AvailableSerialPort('port-a', 'usb-a')]
 
@@ -134,35 +141,6 @@ class MQTTYDiscoveryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn('mqtt_uri is required unless MQTTY_URI is set', stderr.getvalue())
 
-    def test_main_opens_local_dev_device_without_mqtt_uri(self) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch('mqtty.mqtty.local_serial_terminal') as local_terminal,
-        ):
-            main(['/dev/ttyUSB0'])
-
-        local_terminal.assert_called_once_with('/dev/ttyUSB0', 115200)
-
-    def test_main_passes_custom_baud_rate_to_local_device(self) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch('mqtty.mqtty.local_serial_terminal') as local_terminal,
-        ):
-            main(['--baud-rate', '9600', '/dev/ttyUSB0'])
-
-        local_terminal.assert_called_once_with('/dev/ttyUSB0', 9600)
-
-    def test_decode_terminal_escape_handles_sequence_split_across_reads(self) -> None:
-        first, should_exit, escape_pending = decode_terminal_escape(b'\x01')
-        self.assertEqual(first, b'')
-        self.assertFalse(should_exit)
-        self.assertTrue(escape_pending)
-
-        second, should_exit, escape_pending = decode_terminal_escape(b'\x18', escape_pending)
-        self.assertEqual(second, b'')
-        self.assertTrue(should_exit)
-        self.assertFalse(escape_pending)
-
     def test_list_uses_mqtty_uri_default(self) -> None:
         stdout = io.StringIO()
         ports = [AvailableSerialPort('port-a', '/dev/ttyACM0')]
@@ -203,6 +181,24 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
             False,
         )
+        bridge.start_threads.assert_called_once_with()
+        bridge.stdio_to_mqtt.assert_called_once_with()
+
+    def test_main_resolves_dev_path_alias_before_connecting(self) -> None:
+        ports = [AvailableSerialPort('port-a', '/dev/ttyUSB0')]
+        bridge = MagicMock()
+        bridge.slave_name = None
+        mqtty_cls = MagicMock(return_value=bridge)
+        with (
+            patch.dict(os.environ, {'MQTTY_URI': 'mqtt://broker.local/testbench/mark-desktop'}, clear=True),
+            patch('mqtty.mqtty.list_available_serial_ports', return_value=ports) as list_ports,
+            patch('mqtty.mqtty.MQTTY', mqtty_cls),
+            patch('mqtty.mqtty.install_signal_handlers'),
+        ):
+            main(['/dev/ttyUSB0'])
+
+        list_ports.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop', 1.0)
+        mqtty_cls.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop/port-a', False)
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
 

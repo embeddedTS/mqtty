@@ -9,7 +9,7 @@ This is useful for debugging, automation, or tunneling serial communication thro
 ```bash
 mqtty mqtt://<host>/<topic> [--pts-only]
 mqtty <path-below-$MQTTY_URI> [--pts-only]
-mqtty /dev/ttyUSB0 [--baud-rate 115200]
+mqtty /dev/ttyUSB0
 mqtty --list [mqtt://<host>/<topic-base>]
 ```
 
@@ -21,14 +21,13 @@ mqtty --list [mqtt://<host>/<topic-base>]
 * type `Ctrl-A Ctrl-X` to exit, matching picocom's default exit sequence
 * type `Ctrl-A Ctrl-A` to send a literal `Ctrl-A`
 
-Pass a local serial device such as `/dev/ttyUSB0` to open it directly instead of connecting to MQTT:
+Pass the local device alias, such as `/dev/ttyUSB0`, to resolve it through discovery and connect to its MQTT topic:
 
 ```bash
 mqtty /dev/ttyUSB0
-mqtty --baud-rate 9600 /dev/ttyUSB0
 ```
 
-The local device mode defaults to 115200 baud, uses raw terminal input, and exits on `Ctrl-A Ctrl-X`.
+This requires `MQTTY_URI` to point to the broker and topic base where the device is advertised. It uses the same terminal and MQTT behavior as connecting by the device's topic path or another alias.
 
 Use `--pts-only` if you only want a PTY device:
 

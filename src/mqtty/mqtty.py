@@ -6,7 +6,6 @@ import json
 import os
 import pty
 import select
-import serial
 import signal
 import sys
 import termios
@@ -57,60 +56,6 @@ def raw_tty_mode(fd: int) -> Iterator[None]:
         yield
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, original_mode)
-
-
-def local_serial_terminal(device_path: str, baud_rate: int) -> None:
-    """Connect the local terminal to a serial device until stdin closes or Ctrl-A Ctrl-X is typed."""
-    stdin_fd = sys.stdin.fileno()
-    use_escape_mode = os.isatty(stdin_fd)
-    escape_pending = False
-
-    with serial.Serial(device_path, baudrate=baud_rate, timeout=0) as device:
-        device_fd = device.fileno()
-        with raw_tty_mode(stdin_fd):
-            while True:
-                try:
-                    ready, _, _ = select.select([stdin_fd, device_fd], [], [])
-                except InterruptedError:
-                    continue
-
-                if device_fd in ready:
-                    data = device.read(1024)
-                    if data:
-                        sys.stdout.buffer.write(data)
-                        sys.stdout.buffer.flush()
-
-                if stdin_fd in ready:
-                    data = os.read(stdin_fd, 1024)
-                    if not data:
-                        return
-
-                    should_exit = False
-                    if use_escape_mode:
-                        data, should_exit, escape_pending = decode_terminal_escape(data, escape_pending)
-                    if data:
-                        device.write(data)
-                    if should_exit:
-                        return
-
-
-def decode_terminal_escape(data: bytes, escape_pending: bool = False) -> tuple[bytes, bool, bool]:
-    """Decode picocom-style Ctrl-A escapes for the local serial terminal."""
-    output = bytearray()
-    for byte in data:
-        if escape_pending:
-            escape_pending = False
-            if byte == PICOCOM_EXIT:
-                return bytes(output), True, False
-            if byte == PICOCOM_ESCAPE:
-                output.append(PICOCOM_ESCAPE)
-            else:
-                output.extend((PICOCOM_ESCAPE, byte))
-        elif byte == PICOCOM_ESCAPE:
-            escape_pending = True
-        else:
-            output.append(byte)
-    return bytes(output), False, escape_pending
 
 
 class MQTTY:
@@ -477,7 +422,7 @@ def is_full_mqtt_uri(mqtt_uri: str) -> bool:
 
 
 def is_bare_serial_name(mqtt_uri: str) -> bool:
-    return "/" not in mqtt_uri and ":" not in mqtt_uri
+    return mqtt_uri.startswith("/dev/") or ("/" not in mqtt_uri and ":" not in mqtt_uri)
 
 
 def matching_available_ports(query: str, available_ports: list[AvailableSerialPort]) -> list[AvailableSerialPort]:
@@ -534,13 +479,6 @@ def main(argv: list[str] | None = None) -> None:
         help="Seconds to wait for retained discovery messages when using --list",
     )
     parser.add_argument(
-        "-b",
-        "--baud-rate",
-        type=int,
-        default=115200,
-        help="Baud rate when opening a local /dev serial device (default: 115200)",
-    )
-    parser.add_argument(
         "-p",
         "--pts-only",
         action="store_true",
@@ -552,12 +490,6 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--list cannot be combined with --pts-only")
 
     try:
-        if args.mqtt_uri is not None and args.mqtt_uri.startswith("/dev/"):
-            if args.list or args.pts_only:
-                parser.error("local serial devices cannot be combined with --list or --pts-only")
-            local_serial_terminal(args.mqtt_uri, args.baud_rate)
-            return
-
         default_uri = os.environ.get(MQTTY_URI_ENV)
         available_ports: list[AvailableSerialPort] | None = None
         if not args.list and args.mqtt_uri is not None and not is_full_mqtt_uri(args.mqtt_uri) and default_uri is not None:
