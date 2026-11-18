@@ -118,6 +118,16 @@ class MosquittoBroker:
 
         self._tmpdir.cleanup()
 
+    def restart(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait(timeout=3.0)
+        self.start()
+
 
 class MQTTTestClient:
     def __init__(self, host: str, port: int) -> None:
@@ -565,6 +575,58 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
 
             self.assertIn(b"first", payloads)
             self.assertIn(b"second", payloads)
+
+    def test_serial_logger_recovers_after_broker_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            raw_log_path = Path(temp_dir) / "capture.jsonl"
+            logger = MQTTSerialLogger(self.mqtt_uri("itest/logging/restart"), raw_log_path)
+            subscribed = threading.Event()
+            subscribe_count = 0
+
+            def on_subscribe(
+                _client: Client,
+                _userdata: object,
+                _mid: int,
+                _reason_codes: list[ReasonCode],
+                _properties: Properties,
+            ) -> None:
+                nonlocal subscribe_count
+                subscribe_count += 1
+                subscribed.set()
+
+            logger.client.on_subscribe = on_subscribe
+            logger_thread = threading.Thread(target=logger.run, daemon=True)
+            logger_thread.start()
+
+            def stop_logger() -> None:
+                logger.stop_event.set()
+                logger_thread.join(timeout=5.0)
+
+            self.addCleanup(stop_logger)
+            self.assertTrue(wait_until(subscribed.is_set, timeout_s=5.0))
+            initial_subscribe_count = subscribe_count
+
+            self.broker.restart()
+            self.assertTrue(
+                wait_until(lambda: subscribe_count > initial_subscribe_count, timeout_s=10.0),
+                "logger did not resubscribe after broker restart",
+            )
+
+            publisher = MQTTTestClient("127.0.0.1", self.broker.port)
+            self.addCleanup(publisher.close)
+            topic = logger.connection.topic(DEVICE_SERIAL_OUTPUT_TOPIC)
+            publisher.publish(topic, b"after-restart")
+            self.assertTrue(
+                wait_until(lambda: logger.prev_time_ms is not None, timeout_s=5.0),
+                "logger did not receive data after reconnect",
+            )
+
+            logger.stop_event.set()
+            logger_thread.join(timeout=5.0)
+            compressed_path = normalize_compressed_log_path(raw_log_path)
+            with open_serial_log_reader(compressed_path) as log_file:
+                payloads = [decode_serial_record(line)[1] for line in log_file]
+            self.assertIn(b"after-restart", payloads)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from paho.mqtt.client import Client, MQTTMessage
+from paho.mqtt.client import Client, DisconnectFlags, MQTTMessage
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
 
@@ -77,9 +77,9 @@ class BaseMQTTLogger:
         self,
         _client: Client,
         _userdata: object,
-        reason_code: ReasonCode | int | None,
+        _disconnect_flags: DisconnectFlags,
+        reason_code: ReasonCode | int,
         _properties: Properties | None,
-        *_packet_from_broker: object,
     ) -> None:
         sys.stderr.write(f"Disconnected rc={reason_code}\n")
 
