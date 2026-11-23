@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -9,6 +12,20 @@ from mqtty.log_replay import Replayer
 
 
 class ReplayerOutputTests(unittest.TestCase):
+    def test_raw_replay_stdout_contains_only_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "capture.jsonl"
+            log_path.write_text('{"t":0,"d":"aGVsbG8A/w=="}\n', encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-m", "mqtty.log_replay", "--raw", str(log_path)],
+                capture_output=True,
+                check=True,
+                timeout=5,
+            )
+
+        self.assertEqual(result.stdout, b"hello\x00\xff")
+        self.assertIn(b"Replay complete", result.stderr)
+
     def test_write_stdout_bytes_retries_on_blocking_and_partial_writes(self) -> None:
         replayer = Replayer(Path("capture.jsonl.zst"))
         stdout = MagicMock()

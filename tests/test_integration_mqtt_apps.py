@@ -23,7 +23,7 @@ from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
 
 from mqtty.log_io import decode_serial_record, normalize_compressed_log_path, open_serial_log_reader
-from mqtty.mqtty import MQTTY
+from mqtty.mqtty import MQTTY, list_available_serial_ports
 from mqtty.serial_bridge import (
     DEVICE_SERIAL_INPUT_TOPIC,
     DEVICE_SERIAL_OUTPUT_TOPIC,
@@ -318,6 +318,28 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
             outbound,
         )
 
+    def test_mqtty_pts_only_times_out_when_broker_is_unavailable(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unavailable_broker:
+            unavailable_broker.bind(("127.0.0.1", 0))
+            uri = f"mqtt://127.0.0.1:{unavailable_broker.getsockname()[1]}/itest/device"
+            process = subprocess.Popen(
+                [sys.executable, "-m", "mqtty.mqtty", uri, "--pts-only", "--startup-timeout", "0.5"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            finally:
+                if process.returncode is None:
+                    os.killpg(process.pid, 15)
+                    process.communicate(timeout=5)
+
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("timed out after 0.5 seconds waiting for MQTT connection and serial port activation", stderr)
+
     def test_serial_bridge_round_trip_with_fake_serial_symlink(self) -> None:
         cfg = SerialBridgeConfig(
             mqtt=MQTTBridgeConfig(host="127.0.0.1", port=self.broker.port, topic_base="itest/serial-bridge"),
@@ -385,6 +407,58 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
             serial_to_mqtt_again = b"serial-output-2"
             os.write(master_fd, serial_to_mqtt_again)
             self.assertEqual(subscriber.wait_for_message(output_topic), serial_to_mqtt_again)
+
+    def test_serial_bridge_readvertises_open_port_after_broker_restart(self) -> None:
+        cfg = SerialBridgeConfig(
+            mqtt=MQTTBridgeConfig(host="127.0.0.1", port=self.broker.port, topic_base="itest/bridge-restart"),
+            usb_match=None,
+        )
+        uri = self.mqtt_uri(cfg.mqtt.topic_base)
+        port_name = "fake-serial-device"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            serial_base = Path(temp_dir)
+            master_fd, slave_fd = pty.openpty()
+            self.addCleanup(os.close, master_fd)
+            self.addCleanup(os.close, slave_fd)
+            slave_path = os.ttyname(slave_fd)
+            (serial_base / port_name).symlink_to(slave_path)
+
+            bridge = SerialBridge(cfg, serial_base_path=serial_base, scan_interval_s=0.05)
+            subscribed = threading.Event()
+
+            def on_subscribe(
+                _client: Client,
+                _userdata: object,
+                _mid: int,
+                _reason_codes: list[ReasonCode],
+                _properties: Properties | None,
+            ) -> None:
+                subscribed.set()
+
+            bridge.mqtt_client.on_subscribe = on_subscribe
+            with patch("mqtty.serial_bridge.vid_pid_from_symlink", return_value=("1a86", "7523")):
+                bridge_thread = threading.Thread(target=bridge.run, daemon=True)
+                bridge_thread.start()
+                try:
+                    self.assertTrue(wait_until(lambda: port_name in bridge.serial_ports, timeout_s=5.0))
+                    state = bridge.serial_ports[port_name]
+                    before_restart = list_available_serial_ports(uri, timeout_s=0.5)
+                    self.assertEqual([(port.port, port.alias) for port in before_restart], [(port_name, slave_path)])
+
+                    self.assertTrue(subscribed.wait(timeout=5.0))
+                    subscribed.clear()
+                    self.broker.restart()
+                    self.assertTrue(subscribed.wait(timeout=5.0))
+                    publisher = MQTTTestClient("127.0.0.1", self.broker.port)
+                    self.addCleanup(publisher.close)
+                    publisher.publish(join_topic_path(cfg.mqtt.topic_base, port_name, DEVICE_SERIAL_INPUT_TOPIC), b"ok")
+                    self.assertEqual(read_exact(master_fd, 2, timeout_s=5.0), b"ok")
+                    self.assertIs(bridge.serial_ports[port_name], state)
+                    self.assertEqual(list_available_serial_ports(uri, timeout_s=0.5), before_restart)
+                finally:
+                    bridge.stop_event.set()
+                    bridge_thread.join(timeout=5.0)
 
     def test_mqtty_activation_delivers_first_byte_and_sets_requested_baud(self) -> None:
         cfg = SerialBridgeConfig(
@@ -575,6 +649,36 @@ class MQTTAppsIntegrationTests(unittest.TestCase):
 
             self.assertIn(b"first", payloads)
             self.assertIn(b"second", payloads)
+
+    def test_serial_logger_reports_ready_only_after_subscribing(self) -> None:
+        broker = MosquittoBroker(self.broker.binary_path)
+        self.addCleanup(broker.stop)
+        uri = f"mqtt://127.0.0.1:{broker.port}/itest/logging/readiness"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            stdout = directory / "stdout"
+            stderr = directory / "stderr"
+            with stdout.open("w") as stdout_file, stderr.open("w") as stderr_file:
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "mqtty.serial_log", "device", uri, str(directory / "capture.zst")],
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                )
+                try:
+                    self.assertTrue(wait_until(lambda: "Waiting for MQTT subscription" in stderr.read_text(), 5))
+                    self.assertEqual(stdout.read_text(), "")
+                    broker.start()
+                    self.assertTrue(wait_until(lambda: "Logging;" in stdout.read_text(), 5))
+                finally:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
+        self.assertEqual(process.returncode, 0)
 
     def test_serial_logger_recovers_after_broker_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

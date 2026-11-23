@@ -267,7 +267,9 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             main(['/dev/ttyUSB0'])
 
         list_ports.assert_called_once_with('mqtt://broker.local:1883/testbench/serial', 1.0)
-        mqtty_cls.assert_called_once_with('mqtt://broker.local:1883/testbench/serial/port-a', False, 115200)
+        mqtty_cls.assert_called_once_with(
+            'mqtt://broker.local:1883/testbench/serial/port-a', False, 115200, startup_timeout_s=10.0
+        )
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
 
@@ -338,6 +340,7 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             'mqtt://broker.local/testbench/mark-desktop/pci-0000:12:00.3-usb-0:1.1.1.3:1.0',
             False,
             115200,
+            startup_timeout_s=10.0,
         )
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
@@ -358,7 +361,9 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             main(['/dev/ttyUSB0'])
 
         list_ports.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop', 1.0)
-        mqtty_cls.assert_called_once_with('mqtt://broker.local/testbench/mark-desktop/port-a', False, 115200)
+        mqtty_cls.assert_called_once_with(
+            'mqtt://broker.local/testbench/mark-desktop/port-a', False, 115200, startup_timeout_s=10.0
+        )
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
 
@@ -372,9 +377,11 @@ class MQTTYDiscoveryTests(unittest.TestCase):
             patch('mqtty.mqtty.MQTTY', mqtty_cls),
             patch('mqtty.mqtty.install_signal_handlers'),
         ):
-            main(['-b', '9600', 'mqtt://broker.local/testbench/port-a'])
+            main(['-b', '9600', '--startup-timeout', '15', 'mqtt://broker.local/testbench/port-a'])
 
-        mqtty_cls.assert_called_once_with('mqtt://broker.local/testbench/port-a', False, 9600)
+        mqtty_cls.assert_called_once_with(
+            'mqtt://broker.local/testbench/port-a', False, 9600, startup_timeout_s=15.0
+        )
         bridge.start_threads.assert_called_once_with()
         bridge.stdio_to_mqtt.assert_called_once_with()
 

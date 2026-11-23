@@ -53,10 +53,12 @@ class BaseMQTTLogger:
         self.subscribe_topic = self.connection.topic(subscribe_pattern)
         self.client = create_client(self.connection)
         self.client.on_connect = self._on_connect
+        self.client.on_subscribe = self._on_subscribe
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
 
         self.stop_event = threading.Event()
+        self._mqtt_error: Exception | None = None
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
@@ -69,9 +71,24 @@ class BaseMQTTLogger:
         _properties: Properties | None,
     ) -> None:
         if reason_code == 0:
-            client.subscribe(self.subscribe_topic)
+            result, _mid = client.subscribe(self.subscribe_topic)
+            if result != 0:
+                raise RuntimeError(f"could not subscribe to {self.subscribe_topic}: {result}")
         else:
             sys.stderr.write(f"Connect failed rc={reason_code}\n")
+
+    def _on_subscribe(
+        self,
+        _client: Client,
+        _userdata: object,
+        _mid: int,
+        reason_codes: list[ReasonCode],
+        _properties: Properties | None,
+    ) -> None:
+        for reason in reason_codes:
+            if reason.is_failure:
+                raise RuntimeError(f"broker rejected subscription to {self.subscribe_topic}: {reason}")
+        print("Logging; press Ctrl+C to stop", flush=True)
 
     def _on_disconnect(
         self,
@@ -93,19 +110,26 @@ class BaseMQTTLogger:
     def _flush_logs(self) -> None:
         return
 
+    def _run_mqtt(self) -> None:
+        try:
+            connect_and_loop_forever(self.client, self.connection)
+            if not self.stop_event.is_set():
+                raise RuntimeError("network loop ended unexpectedly")
+        except Exception as error:  # noqa: BLE001 - Forward network and capture errors to the CLI thread.
+            self._mqtt_error = error
+            self.stop_event.set()
+
     def run(self) -> None:
         try:
-            threading.Thread(
-                target=connect_and_loop_forever,
-                args=(self.client, self.connection),
-                daemon=True,
-            ).start()
-            print("Logging; press Ctrl+C to stop")
+            print("Waiting for MQTT subscription...", file=sys.stderr, flush=True)
+            threading.Thread(target=self._run_mqtt, daemon=True).start()
             while not self.stop_event.wait(self.flush_interval_s):
                 self._flush_logs()
         finally:
             self._flush_logs()
             self.client.disconnect()
+        if self._mqtt_error is not None:
+            raise RuntimeError(f"MQTT logging stopped: {self._mqtt_error}") from self._mqtt_error
 
 
 class MQTTSerialLogger(BaseMQTTLogger):
@@ -234,7 +258,7 @@ def main() -> None:
             parser.error(f"Unknown command: {args.command}")
 
         logger.run()
-    except ValueError as error:
+    except (OSError, RuntimeError, ValueError) as error:
         sys.stderr.write(f"Error: {error}\n")
         raise SystemExit(1) from error
 

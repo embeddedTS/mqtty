@@ -21,6 +21,7 @@ mqtty --list [mqtt://<host>/<topic-base>] [--config /path/to/mqtty-serial-bridge
 * type `Ctrl-A Ctrl-X` to exit, matching picocom's default exit sequence
 * type `Ctrl-A Ctrl-A` to send a literal `Ctrl-A`
 * before forwarding data, mqtty asks the serial bridge to activate the port and waits for a ready response
+* `--startup-timeout SECONDS` sets the initial deadline for connecting to the broker and activating the port (default `10`)
 * the default serial baud rate is 115200
 
 Use `-b` or `--baud-rate` to request a different baud rate for the connected device:
@@ -69,7 +70,7 @@ mqtty-log prefix mqtt://<host>/<topic-prefix> logs/
 mqtty-log-replay path/to/replay.jsonl.zst [--raw] [--follow] [--info]
 ```
 
-Raw `.jsonl` logs are still accepted for replay and inspection.
+Raw `.jsonl` logs are still accepted for replay and inspection. With `--raw`, stdout contains only the recorded bytes.
 
 `mqtty-serial-bridge` discovers local serial devices and bridges them to MQTT:
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from paho.mqtt.client import Client, MQTTMessage
+from paho.mqtt.client import Client, DisconnectFlags, MQTTMessage
 from paho.mqtt.enums import CallbackAPIVersion
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
@@ -202,15 +202,18 @@ class SerialBridge:
                     (self.input_subscribe_topic, 0),
                     (control_subscribe_topic(self.cfg.mqtt.topic_base), 0),
                 ])
+                with self._state_lock:
+                    for port, state in self.serial_ports.items():
+                        self.publish_port_availability(port, state.alias, state.baud_rate)
             else:
                 logger.error('MQTT connection failed with code %s', reason_code)
 
         def on_disconnect(
             _client: Client,
             _userdata: Any,
-            reason_code: ReasonCode | int | None,
+            _disconnect_flags: DisconnectFlags,
+            reason_code: ReasonCode | int,
             _properties: Properties | None,
-            *_packet_from_broker: object,
         ) -> None:
             logger.warning('Disconnected from MQTT broker (rc=%s)', reason_code)
 
@@ -394,8 +397,13 @@ class SerialBridge:
                     raise ValueError('baud_rate must be a positive integer')
                 with state.io_lock:
                     state.connection.baudrate = requested_baud
+            with self._state_lock:
+                if self.serial_ports.get(port) is not state:
+                    self.publish_control_status(port, request_id, False, False, error='serial port is not open')
+                    return
+                if requested_baud is not None:
                     state.baud_rate = requested_baud
-            self.publish_port_availability(port, state.alias, state.baud_rate)
+                self.publish_port_availability(port, state.alias, state.baud_rate)
             self.publish_control_status(port, request_id, True, True, baud_rate=state.baud_rate)
         except Exception as exc:
             logger.warning('Invalid control message for %s: %s', port, exc)
@@ -470,8 +478,8 @@ class SerialBridge:
             )
             with self._state_lock:
                 self.serial_ports[port] = state
-            thread.start()
-            self.publish_port_availability(port, alias, state.baud_rate)
+                thread.start()
+                self.publish_port_availability(port, alias, state.baud_rate)
         except Exception as exc:
             logger.error('Failed to open %s: %s', port, exc)
             if real_dev_path:
@@ -496,8 +504,7 @@ class SerialBridge:
                 removed_state = self.serial_ports.pop(port, None)
                 if removed_state is not None:
                     self.opened_real_devices.discard(removed_state.real_device_path)
-            if removed_state is not None:
-                self.clear_port_availability(port)
+                    self.clear_port_availability(port)
 
     def handle_serial(self, port: str, serial_conn: Any, serial_output_topic: str) -> None:
         try:
@@ -508,7 +515,7 @@ class SerialBridge:
 
                 with self._state_lock:
                     state = self.serial_ports.get(port)
-                if state is None:
+                if state is None or state.connection is not serial_conn:
                     break
                 with state.io_lock:
                     data = serial_conn.read(serial_conn.in_waiting or 1)
@@ -523,12 +530,11 @@ class SerialBridge:
                 pass
 
             with self._state_lock:
-                state = self.serial_ports.pop(port, None)
-                if state is not None:
+                state = self.serial_ports.get(port)
+                if state is not None and state.connection is serial_conn:
+                    del self.serial_ports[port]
                     self.opened_real_devices.discard(state.real_device_path)
-
-            if state is not None:
-                self.clear_port_availability(port)
+                    self.clear_port_availability(port)
 
             logger.info('Thread exiting for port: %s', port)
 

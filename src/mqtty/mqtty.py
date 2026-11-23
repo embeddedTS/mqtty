@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import pty
 import select
@@ -42,6 +43,8 @@ MQTT_URI_SCHEMES = ("mqtt://", "ws://", "wss://")
 CONNECTION_NOTICE = "< mqtty connection established >\r\n"
 STARTUP_READY = b"R"
 STARTUP_FAILED = b"F"
+DEFAULT_STARTUP_TIMEOUT_S = 10.0
+ACTIVATION_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,10 +68,18 @@ def raw_tty_mode(fd: int) -> Iterator[None]:
 
 
 class MQTTY:
-    def __init__(self, mqtt_uri: str, use_pty: bool, baud_rate: int = DEFAULT_BAUD_RATE) -> None:
+    def __init__(
+        self,
+        mqtt_uri: str,
+        use_pty: bool,
+        baud_rate: int = DEFAULT_BAUD_RATE,
+        *,
+        startup_timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S,
+    ) -> None:
         self.connection = MQTTConnectionInfo.parse(mqtt_uri)
         self.use_pty = use_pty
         self.baud_rate = baud_rate
+        self.startup_timeout_s = startup_timeout_s
 
         self.device_serial_input_topic = self.connection.topic("device_serial_input")
         self.device_serial_output_topic = self.connection.topic("device_serial_output")
@@ -98,6 +109,7 @@ class MQTTY:
         self.detached_startup = False
         self.activation_error: str | None = None
         self.activation_timer: threading.Timer | None = None
+        self.activation_lock = threading.Lock()
 
     def report_startup(self, status: bytes) -> None:
         """Report the detached PTY bridge's startup result to its parent once."""
@@ -143,26 +155,38 @@ class MQTTY:
             client.disconnect()
             return
 
-        if self.activation_timer is not None:
-            self.activation_timer.cancel()
-            self.activation_timer = None
-        self.connected = True
-        self.connected_event.set()
+        with self.activation_lock:
+            if self.stop_event.is_set():
+                return
+            if self.activation_timer is not None:
+                self.activation_timer.cancel()
+                self.activation_timer = None
+            self.connected = True
+            self.connected_event.set()
         if not self.connection_notice_printed:
             sys.stderr.write(CONNECTION_NOTICE)
             self.connection_notice_printed = True
         if self.detached_startup:
             self.report_startup(STARTUP_READY)
 
-    def activation_timed_out(self) -> None:
-        if self.connected or self.stop_event.is_set():
-            return
-        self.activation_error = "timed out waiting for the serial bridge to activate the port"
-        sys.stderr.write(f"MQTTY bridge activation failed: {self.activation_error}\n")
-        self.report_startup(STARTUP_FAILED)
-        self.stop_event.set()
+    def activation_timed_out(self, message: str) -> None:
+        with self.activation_lock:
+            if self.activation_timer is not threading.current_thread() or self.connected or self.stop_event.is_set():
+                return
+            self.activation_error = message
+            sys.stderr.write(f"MQTTY bridge activation failed: {message}\n")
+            self.report_startup(STARTUP_FAILED)
+            self.stop_event.set()
         with contextlib.suppress(Exception):
             self.mqtt_client.disconnect()
+
+    def start_activation_timer(self, timeout_s: float, message: str) -> None:
+        with self.activation_lock:
+            if self.activation_timer is not None or self.stop_event.is_set():
+                return
+            self.activation_timer = threading.Timer(timeout_s, self.activation_timed_out, args=(message,))
+            self.activation_timer.daemon = True
+            self.activation_timer.start()
 
     def request_activation(self, client: Client) -> None:
         payload = json.dumps(
@@ -181,9 +205,7 @@ class MQTTY:
             self.stop_event.set()
             client.disconnect()
             return
-        self.activation_timer = threading.Timer(5.0, self.activation_timed_out)
-        self.activation_timer.daemon = True
-        self.activation_timer.start()
+        self.start_activation_timer(ACTIVATION_TIMEOUT_S, "timed out waiting for the serial bridge to activate the port")
 
     def mqtt_connect(self) -> None:
         self.mqtt_client.on_message = self.on_message
@@ -345,6 +367,10 @@ class MQTTY:
         self.stop_event.set()
 
     def start_threads(self) -> None:
+        self.start_activation_timer(
+            self.startup_timeout_s,
+            f"timed out after {self.startup_timeout_s:g} seconds waiting for MQTT connection and serial port activation",
+        )
         mqtt_thread = threading.Thread(target=self.mqtt_connect, daemon=True)
         mqtt_thread.start()
 
@@ -569,6 +595,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Seconds to wait for retained discovery messages when using --list",
     )
     parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=DEFAULT_STARTUP_TIMEOUT_S,
+        help=f"Seconds to wait for broker connection and port activation (default: {DEFAULT_STARTUP_TIMEOUT_S:g})",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=None,
@@ -595,6 +627,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("-a can only be used with --list")
     if args.baud_rate <= 0:
         parser.error("--baud-rate must be a positive integer")
+    if not math.isfinite(args.startup_timeout) or args.startup_timeout <= 0:
+        parser.error("--startup-timeout must be a positive, finite number")
     if args.mqtt_uri is None and not args.list:
         parser.error("mqtt_uri is required unless --list is specified")
 
@@ -651,20 +685,19 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"{discovered_port_uri(mqtt_uri, available_port.port)} ({available_port.alias})")
             return
 
+        bridge = MQTTY(mqtt_uri, args.pts_only, args.baud_rate, startup_timeout_s=args.startup_timeout)
         if args.pts_only:
-            bridge = MQTTY(mqtt_uri, True, args.baud_rate)
             if bridge.slave_name is None:
                 raise RuntimeError("Failed to create PTY device")
             child_pid = run_detached_pty_bridge(bridge)
             print(f"MQTTY_PTS={bridge.slave_name}")
             print(f"MQTTY_PID={child_pid}", flush=True)
         else:
-            bridge = MQTTY(mqtt_uri, False, args.baud_rate)
             install_signal_handlers(bridge)
             bridge.start_threads()
             bridge.stdio_to_mqtt()
             if bridge.activation_error is not None:
-                    raise SystemExit(1)
+                raise SystemExit(1)
     except (OSError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         raise SystemExit(1) from e

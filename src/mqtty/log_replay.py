@@ -182,7 +182,7 @@ class Replayer:
 
                 self._write_stdout_bytes(payload)
         elapsed = time.perf_counter() - start
-        print(f"\n===== Replay complete: {elapsed:.3f} s wall-time =====")
+        print(f"\n===== Replay complete: {elapsed:.3f} s wall-time =====", file=sys.stderr)
 
     def _interactive(self) -> None:
         print("===== Press Left/Right to slow/fast, Up reset, Down instant, Enter skip, i info =====\n")
@@ -262,7 +262,7 @@ def main() -> int:
         else:
             replayer.run()
     except KeyboardInterrupt:
-        print()
+        print(file=sys.stderr if args.raw else sys.stdout)
         return 130
 
     return 0
